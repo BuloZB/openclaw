@@ -213,6 +213,40 @@ const mocks = vi.hoisted(() => ({
   }),
   runSecurityAudit: vi.fn().mockResolvedValue(createDefaultSecurityAuditResult()),
   buildPluginCompatibilityNotices: vi.fn((): PluginCompatibilityNotice[] => []),
+  getInspectableTaskRegistrySummary: vi.fn().mockReturnValue({
+    total: 0,
+    active: 0,
+    terminal: 0,
+    failures: 0,
+    byStatus: {
+      queued: 0,
+      running: 0,
+      succeeded: 0,
+      failed: 0,
+      timed_out: 0,
+      cancelled: 0,
+      lost: 0,
+    },
+    byRuntime: {
+      subagent: 0,
+      acp: 0,
+      cli: 0,
+      cron: 0,
+    },
+  }),
+  getInspectableTaskAuditSummary: vi.fn().mockReturnValue({
+    total: 0,
+    warnings: 0,
+    errors: 0,
+    byCode: {
+      stale_queued: 0,
+      stale_running: 0,
+      lost: 0,
+      delivery_failed: 0,
+      missing_cleanup: 0,
+      inconsistent_timestamps: 0,
+    },
+  }),
   resolveGatewayService: vi.fn().mockReturnValue({
     label: "LaunchAgent",
     loadedText: "loaded",
@@ -314,8 +348,8 @@ vi.mock("../channels/config-presence.js", async (importOriginal) => {
   };
 });
 vi.mock("../channels/plugins/index.js", () => ({
-  listChannelPlugins: () =>
-    [
+  listChannelPlugins: () => {
+    const plugins = [
       {
         id: "whatsapp",
         meta: {
@@ -326,6 +360,7 @@ vi.mock("../channels/plugins/index.js", () => ({
           blurb: "mock",
         },
         config: {
+          hasPersistentAuth: () => true,
           listAccountIds: () => ["default"],
           resolveAccount: () => ({}),
         },
@@ -347,9 +382,46 @@ vi.mock("../channels/plugins/index.js", () => ({
           docsPath: "/platforms/mac",
         }),
       },
-    ] as unknown,
+    ] as const;
+    return plugins as unknown;
+  },
+  getChannelPlugin: (channelId: string) =>
+    [
+      {
+        id: "whatsapp",
+        meta: {
+          id: "whatsapp",
+          label: "WhatsApp",
+          selectionLabel: "WhatsApp",
+          docsPath: "/platforms/whatsapp",
+          blurb: "mock",
+        },
+        config: {
+          hasPersistentAuth: () => true,
+          listAccountIds: () => ["default"],
+          resolveAccount: () => ({}),
+        },
+        status: {
+          buildChannelSummary: async () => ({ linked: true, authAgeMs: 5000 }),
+        },
+      },
+      {
+        ...createErrorChannelPlugin({
+          id: "signal",
+          label: "Signal",
+          docsPath: "/platforms/signal",
+        }),
+      },
+      {
+        ...createErrorChannelPlugin({
+          id: "imessage",
+          label: "iMessage",
+          docsPath: "/platforms/mac",
+        }),
+      },
+    ].find((plugin) => plugin.id === channelId) as unknown,
 }));
-vi.mock("../plugins/runtime/runtime-whatsapp-boundary.js", () => ({
+vi.mock("../plugins/runtime/runtime-web-channel-plugin.js", () => ({
   webAuthExists: mocks.webAuthExists,
   getWebAuthAgeMs: mocks.getWebAuthAgeMs,
   readWebSelfId: mocks.readWebSelfId,
@@ -376,9 +448,14 @@ vi.mock("../gateway/session-utils.js", async (importOriginal) => {
     ...actual,
   };
 });
-vi.mock("../infra/openclaw-root.js", () => ({
-  resolveOpenClawPackageRoot: vi.fn().mockResolvedValue("/tmp/openclaw"),
-}));
+vi.mock("../infra/openclaw-root.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../infra/openclaw-root.js")>();
+  return {
+    ...actual,
+    resolveOpenClawPackageRoot: vi.fn().mockResolvedValue("/tmp/openclaw"),
+    resolveOpenClawPackageRootSync: vi.fn(() => "/tmp/openclaw"),
+  };
+});
 vi.mock("../infra/os-summary.js", () => ({
   resolveOsSummary: () => ({
     platform: "darwin",
@@ -433,6 +510,10 @@ vi.mock("../daemon/node-service.js", () => ({
 vi.mock("../node-host/config.js", () => ({
   loadNodeHostConfig: mocks.loadNodeHostConfig,
 }));
+vi.mock("../tasks/task-registry.maintenance.js", () => ({
+  getInspectableTaskRegistrySummary: mocks.getInspectableTaskRegistrySummary,
+  getInspectableTaskAuditSummary: mocks.getInspectableTaskAuditSummary,
+}));
 vi.mock("../security/audit.js", () => ({
   runSecurityAudit: mocks.runSecurityAudit,
 }));
@@ -455,6 +536,40 @@ const runtime = {
 };
 
 const runtimeLogMock = runtime.log as Mock<(...args: unknown[]) => void>;
+
+vi.mock("../channels/chat-meta.js", () => {
+  const mockChatChannels = [
+    "telegram",
+    "whatsapp",
+    "discord",
+    "irc",
+    "googlechat",
+    "slack",
+    "signal",
+    "imessage",
+    "line",
+  ] as const;
+  const entries = mockChatChannels.map((id) => ({
+    id,
+    label: id,
+    selectionLabel: id,
+    docsPath: `/channels/${id}`,
+    blurb: "mock",
+  }));
+  const byId = Object.fromEntries(entries.map((entry) => [entry.id, entry]));
+  return {
+    CHAT_CHANNEL_ALIASES: {},
+    listChatChannels: () => entries,
+    listChatChannelAliases: () => [],
+    getChatChannelMeta: (id: (typeof mockChatChannels)[number]) => byId[id],
+    normalizeChatChannelId: (raw?: string | null) => {
+      const value = raw?.trim().toLowerCase();
+      return mockChatChannels.includes(value as (typeof mockChatChannels)[number])
+        ? (value as (typeof mockChatChannels)[number])
+        : null;
+    },
+  };
+});
 
 describe("statusCommand", () => {
   afterEach(() => {
@@ -485,6 +600,42 @@ describe("statusCommand", () => {
     });
     mocks.buildPluginCompatibilityNotices.mockReset();
     mocks.buildPluginCompatibilityNotices.mockReturnValue([]);
+    mocks.getInspectableTaskRegistrySummary.mockReset();
+    mocks.getInspectableTaskRegistrySummary.mockReturnValue({
+      total: 0,
+      active: 0,
+      terminal: 0,
+      failures: 0,
+      byStatus: {
+        queued: 0,
+        running: 0,
+        succeeded: 0,
+        failed: 0,
+        timed_out: 0,
+        cancelled: 0,
+        lost: 0,
+      },
+      byRuntime: {
+        subagent: 0,
+        acp: 0,
+        cli: 0,
+        cron: 0,
+      },
+    });
+    mocks.getInspectableTaskAuditSummary.mockReset();
+    mocks.getInspectableTaskAuditSummary.mockReturnValue({
+      total: 0,
+      warnings: 0,
+      errors: 0,
+      byCode: {
+        stale_queued: 0,
+        stale_running: 0,
+        lost: 0,
+        delivery_failed: 0,
+        missing_cleanup: 0,
+        inconsistent_timestamps: 0,
+      },
+    });
     mocks.hasPotentialConfiguredChannels.mockReset();
     mocks.hasPotentialConfiguredChannels.mockReturnValue(true);
     mocks.runSecurityAudit.mockReset();
@@ -630,6 +781,47 @@ describe("statusCommand", () => {
           line.includes("openclaw --profile isolated status --all"),
       ),
     ).toBe(true);
+  });
+
+  it("shows a maintenance hint when task audit errors are present", async () => {
+    mocks.getInspectableTaskRegistrySummary.mockReturnValue({
+      total: 1,
+      active: 1,
+      terminal: 0,
+      failures: 1,
+      byStatus: {
+        queued: 0,
+        running: 1,
+        succeeded: 0,
+        failed: 0,
+        timed_out: 0,
+        cancelled: 0,
+        lost: 0,
+      },
+      byRuntime: {
+        subagent: 0,
+        acp: 1,
+        cli: 0,
+        cron: 0,
+      },
+    });
+    mocks.getInspectableTaskAuditSummary.mockReturnValue({
+      total: 1,
+      warnings: 0,
+      errors: 1,
+      byCode: {
+        stale_queued: 0,
+        stale_running: 1,
+        lost: 0,
+        delivery_failed: 0,
+        missing_cleanup: 0,
+        inconsistent_timestamps: 0,
+      },
+    });
+
+    const joined = await runStatusAndGetJoinedLogs();
+
+    expect(joined).toContain("tasks maintenance --apply");
   });
 
   it("caps cached percentage at the prompt-token denominator for legacy session totals", async () => {
