@@ -232,22 +232,27 @@ describe("buildInlineProviderModels", () => {
     expect(result[0].headers).toEqual({ "X-Tenant": "acme" });
   });
 
-  it("rejects inline provider transport overrides that the llm model path cannot carry", () => {
-    expect(() =>
-      buildInlineProviderModels({
-        proxy: {
-          baseUrl: "https://proxy.example.com/v1",
-          api: "openai-completions",
-          request: {
-            proxy: {
-              mode: "explicit-proxy",
-              url: "http://proxy.internal:8443",
-            },
+  it("keeps inline provider transport overrides once the llm transport adapter is available", () => {
+    const result = buildInlineProviderModels({
+      proxy: {
+        baseUrl: "https://proxy.example.com/v1",
+        api: "openai-completions",
+        request: {
+          proxy: {
+            mode: "explicit-proxy",
+            url: "http://proxy.internal:8443",
           },
-          models: [makeModel("proxy-model")],
         },
-      } as unknown as Parameters<typeof buildInlineProviderModels>[0]),
-    ).toThrow(/models\.providers\.\*\.request only supports headers and auth overrides/i);
+        models: [makeModel("proxy-model")],
+      },
+    } as unknown as Parameters<typeof buildInlineProviderModels>[0]);
+
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({
+      provider: "proxy",
+      api: "openai-completions",
+      baseUrl: "https://proxy.example.com/v1",
+    });
   });
 
   it("omits headers when neither provider nor model specifies them", () => {
@@ -842,13 +847,13 @@ describe("resolveModel", () => {
     expect(result.model).toMatchObject(buildOpenAICodexForwardCompatExpectation("gpt-5.4"));
   });
 
-  it("builds an openai-codex fallback for gpt-5.4", () => {
+  it("builds an openai-codex fallback for gpt-5.4-mini", () => {
     mockOpenAICodexTemplateModel(discoverModels);
 
-    const result = resolveModelForTest("openai-codex", "gpt-5.4", "/tmp/agent");
+    const result = resolveModelForTest("openai-codex", "gpt-5.4-mini", "/tmp/agent");
 
     expect(result.error).toBeUndefined();
-    expect(result.model).toMatchObject(buildOpenAICodexForwardCompatExpectation("gpt-5.4"));
+    expect(result.model).toMatchObject(buildOpenAICodexForwardCompatExpectation("gpt-5.4-mini"));
   });
 
   it("builds an openai-codex fallback for gpt-5.3-codex-spark", () => {
@@ -908,9 +913,9 @@ describe("resolveModel", () => {
   it("applies provider overrides to openai gpt-5.4 forward-compat models", () => {
     mockDiscoveredModel(discoverModels, {
       provider: "openai",
-      modelId: "gpt-5.2",
+      modelId: "gpt-5.4",
       templateModel: buildForwardCompatTemplate({
-        id: "gpt-5.2",
+        id: "gpt-5.4",
         name: "GPT-5.2",
         provider: "openai",
         api: "openai-responses",
@@ -987,12 +992,23 @@ describe("resolveModel", () => {
     );
   });
 
-  it("builds an openai fallback for gpt-5.4 mini from the gpt-5-mini template", () => {
+  it("resolves github-copilot Claude dynamic models to anthropic-messages by default", () => {
+    const result = resolveModelForTest("github-copilot", "claude-sonnet-4.6", "/tmp/agent");
+
+    expect(result.error).toBeUndefined();
+    expect(result.model).toMatchObject({
+      provider: "github-copilot",
+      id: "claude-sonnet-4.6",
+      api: "anthropic-messages",
+    });
+  });
+
+  it("builds an openai fallback for gpt-5.4 mini from the gpt-5.4-mini template", () => {
     mockDiscoveredModel(discoverModels, {
       provider: "openai",
-      modelId: "gpt-5-mini",
+      modelId: "gpt-5.4-mini",
       templateModel: buildForwardCompatTemplate({
-        id: "gpt-5-mini",
+        id: "gpt-5.4-mini",
         name: "GPT-5 mini",
         provider: "openai",
         api: "openai-responses",
@@ -1019,12 +1035,12 @@ describe("resolveModel", () => {
     });
   });
 
-  it("builds an openai fallback for gpt-5.4 nano from the gpt-5-nano template", () => {
+  it("builds an openai fallback for gpt-5.4 nano from the gpt-5.4-nano template", () => {
     mockDiscoveredModel(discoverModels, {
       provider: "openai",
-      modelId: "gpt-5-nano",
+      modelId: "gpt-5.4-nano",
       templateModel: buildForwardCompatTemplate({
-        id: "gpt-5-nano",
+        id: "gpt-5.4-nano",
         name: "GPT-5 nano",
         provider: "openai",
         api: "openai-responses",
@@ -1142,6 +1158,7 @@ describe("resolveModel", () => {
       runtimeHooks: {
         applyProviderResolvedModelCompatWithPlugins: () => undefined,
         buildProviderUnknownModelHintWithPlugin: () => undefined,
+        clearProviderRuntimeHookCache: () => {},
         prepareProviderDynamicModel: async () => {},
         runProviderDynamicModel: () => undefined,
         applyProviderResolvedTransportWithPlugin: ({ provider, context }) =>
