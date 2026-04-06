@@ -96,6 +96,7 @@ if ((${#auth_files[@]} > 0)); then
   for auth_file in "${auth_files[@]}"; do
     [ -n "$auth_file" ] || continue
     if [ -f "/host-auth-files/$auth_file" ]; then
+      mkdir -p "$(dirname "$HOME/$auth_file")"
       cp "/host-auth-files/$auth_file" "$HOME/$auth_file"
       chmod u+rw "$HOME/$auth_file" || true
     fi
@@ -144,7 +145,13 @@ tar -C /src \
   --exclude=ui/dist \
   --exclude=ui/node_modules \
   -cf - . | tar -C "$tmp_dir" -xf -
-ln -s /app/node_modules "$tmp_dir/node_modules"
+# Use a writable node_modules overlay in the temp repo. Vite writes bundled
+# config artifacts under the nearest node_modules/.vite-temp path, and the
+# build-stage /app/node_modules tree is root-owned in this Docker lane.
+mkdir -p "$tmp_dir/node_modules"
+cp -aRs /app/node_modules/. "$tmp_dir/node_modules"
+rm -rf "$tmp_dir/node_modules/.vite-temp"
+mkdir -p "$tmp_dir/node_modules/.vite-temp"
 ln -s /app/dist "$tmp_dir/dist"
 if [ -d /app/dist-runtime/extensions ]; then
   export OPENCLAW_BUNDLED_PLUGINS_DIR=/app/dist-runtime/extensions

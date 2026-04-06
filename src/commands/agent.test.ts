@@ -6,12 +6,12 @@ import "../cron/isolated-agent.mocks.js";
 import { __testing as acpManagerTesting } from "../acp/control-plane/manager.js";
 import { resolveAgentDir, resolveSessionAgentId } from "../agents/agent-scope.js";
 import * as authProfilesModule from "../agents/auth-profiles.js";
-import * as cliRunnerModule from "../agents/cli-runner.js";
 import * as sessionStoreModule from "../agents/command/session-store.js";
 import { resolveSession } from "../agents/command/session.js";
 import { loadModelCatalog } from "../agents/model-catalog.js";
 import * as modelSelectionModule from "../agents/model-selection.js";
 import { runEmbeddedPiAgent } from "../agents/pi-embedded.js";
+import * as commandConfigResolutionModule from "../cli/command-config-resolution.js";
 import type { OpenClawConfig } from "../config/config.js";
 import * as configModule from "../config/config.js";
 import { clearSessionStoreCacheForTest } from "../config/sessions.js";
@@ -96,47 +96,9 @@ const runtime: RuntimeEnv = {
 
 const configSpy = vi.spyOn(configModule, "loadConfig");
 const readConfigFileSnapshotForWriteSpy = vi.spyOn(configModule, "readConfigFileSnapshotForWrite");
-const runCliAgentSpy = vi.spyOn(cliRunnerModule, "runCliAgent");
 
 async function withTempHome<T>(fn: (home: string) => Promise<T>): Promise<T> {
   return withTempHomeBase(fn, { prefix: "openclaw-agent-" });
-}
-
-async function loadFreshAgentCommandModulesForTest() {
-  vi.resetModules();
-  const runEmbeddedPiAgentMock = vi.fn();
-  const loadModelCatalogMock = vi.fn();
-  const isCliProviderMock = vi.fn(() => false);
-  vi.doMock("../agents/pi-embedded.js", () => ({
-    abortEmbeddedPiRun: vi.fn().mockReturnValue(false),
-    runEmbeddedPiAgent: runEmbeddedPiAgentMock,
-    resolveEmbeddedSessionLane: (key: string) => `session:${key.trim() || "main"}`,
-  }));
-  vi.doMock("../agents/model-catalog.js", () => ({
-    loadModelCatalog: loadModelCatalogMock,
-  }));
-  vi.doMock("../agents/model-selection.js", async () => {
-    const actual = await vi.importActual<typeof import("../agents/model-selection.js")>(
-      "../agents/model-selection.js",
-    );
-    return {
-      ...actual,
-      isCliProvider: isCliProviderMock,
-    };
-  });
-  const [agentModule, configModuleFresh, commandSecretGatewayModuleFresh] = await Promise.all([
-    import("./agent.js"),
-    import("../config/config.js"),
-    import("../cli/command-secret-gateway.js"),
-  ]);
-  return {
-    agentCommand: agentModule.agentCommand,
-    configModuleFresh,
-    commandSecretGatewayModuleFresh,
-    runEmbeddedPiAgentMock,
-    loadModelCatalogMock,
-    isCliProviderMock,
-  };
 }
 
 function mockConfig(
@@ -336,7 +298,6 @@ beforeEach(() => {
   resetPluginRuntimeStateForTest();
   acpManagerTesting.resetAcpSessionManagerForTests();
   configModule.clearRuntimeConfigSnapshot();
-  runCliAgentSpy.mockResolvedValue(createDefaultAgentResult() as never);
   vi.mocked(runEmbeddedPiAgent).mockResolvedValue(createDefaultAgentResult());
   vi.mocked(loadModelCatalog).mockResolvedValue([]);
   vi.mocked(modelSelectionModule.isCliProvider).mockImplementation(() => false);
@@ -349,26 +310,7 @@ beforeEach(() => {
 describe("agentCommand", () => {
   it("sets runtime snapshots from source config before embedded agent run", async () => {
     await withTempHome(async (home) => {
-      const {
-        agentCommand: freshAgentCommand,
-        configModuleFresh,
-        commandSecretGatewayModuleFresh,
-        runEmbeddedPiAgentMock,
-        loadModelCatalogMock,
-        isCliProviderMock,
-      } = await loadFreshAgentCommandModulesForTest();
-      const freshConfigSpy = vi.spyOn(configModuleFresh, "loadConfig");
-      const freshReadConfigFileSnapshotForWriteSpy = vi.spyOn(
-        configModuleFresh,
-        "readConfigFileSnapshotForWrite",
-      );
-      const freshSetRuntimeConfigSnapshotSpy = vi.spyOn(
-        configModuleFresh,
-        "setRuntimeConfigSnapshot",
-      );
-      runEmbeddedPiAgentMock.mockResolvedValue(createDefaultAgentResult());
-      loadModelCatalogMock.mockResolvedValue([]);
-      isCliProviderMock.mockImplementation(() => false);
+      const setRuntimeConfigSnapshotSpy = vi.spyOn(configModule, "setRuntimeConfigSnapshot");
 
       const store = path.join(home, "sessions.json");
       const loadedConfig = {
@@ -415,29 +357,29 @@ describe("agentCommand", () => {
         },
       } as unknown as OpenClawConfig;
 
-      freshConfigSpy.mockReturnValue(loadedConfig);
-      freshReadConfigFileSnapshotForWriteSpy.mockResolvedValue({
+      configSpy.mockReturnValue(loadedConfig);
+      readConfigFileSnapshotForWriteSpy.mockResolvedValue({
         snapshot: { valid: true, resolved: sourceConfig },
         writeOptions: {},
       } as Awaited<ReturnType<typeof configModule.readConfigFileSnapshotForWrite>>);
-      const resolveSecretsSpy = vi
-        .spyOn(commandSecretGatewayModuleFresh, "resolveCommandSecretRefsViaGateway")
+      const resolveConfigWithSecretsSpy = vi
+        .spyOn(commandConfigResolutionModule, "resolveCommandConfigWithSecrets")
         .mockResolvedValueOnce({
           resolvedConfig,
+          effectiveConfig: resolvedConfig,
           diagnostics: [],
-          targetStatesByPath: {},
-          hadUnresolvedTargets: false,
         });
 
-      await freshAgentCommand({ message: "hello", to: "+1555" }, runtime);
+      await agentCommand({ message: "hello", to: "+1555" }, runtime);
 
-      expect(resolveSecretsSpy).toHaveBeenCalledWith({
+      expect(resolveConfigWithSecretsSpy).toHaveBeenCalledWith({
         config: loadedConfig,
         commandName: "agent",
         targetIds: expect.any(Set),
+        runtime,
       });
-      expect(freshSetRuntimeConfigSnapshotSpy).toHaveBeenCalledWith(resolvedConfig, sourceConfig);
-      expect(runEmbeddedPiAgentMock.mock.calls.at(-1)?.[0]?.config).toBe(resolvedConfig);
+      expect(setRuntimeConfigSnapshotSpy).toHaveBeenCalledWith(resolvedConfig, sourceConfig);
+      expect(vi.mocked(runEmbeddedPiAgent).mock.calls.at(-1)?.[0]?.config).toBe(resolvedConfig);
     });
   });
 
@@ -568,15 +510,14 @@ describe("agentCommand", () => {
     });
   });
 
-  it("persists explicit session-id-only CLI runs with the synthetic session key", async () => {
+  it("persists explicit session-id-only runs with the synthetic session key", async () => {
     await withTempHome(async (home) => {
       const store = path.join(home, "sessions.json");
       mockConfig(home, store, {
         model: { primary: "claude-cli/claude-sonnet-4-6" },
         models: { "claude-cli/claude-sonnet-4-6": {} },
       });
-      vi.mocked(modelSelectionModule.isCliProvider).mockImplementation(() => true);
-      runCliAgentSpy.mockResolvedValue({
+      vi.mocked(runEmbeddedPiAgent).mockResolvedValue({
         payloads: [{ text: "ok" }],
         meta: {
           durationMs: 5,
@@ -589,7 +530,7 @@ describe("agentCommand", () => {
             },
           },
         },
-      } as never);
+      });
 
       await agentCommand({ message: "resume me", sessionId: "explicit-session-123" }, runtime);
 
@@ -1105,7 +1046,7 @@ describe("agentCommand", () => {
     await expectPersistedSessionFile({
       seedKey: "agent:main:telegram:group:123:topic:456",
       sessionId: "sess-topic",
-      expectedPathFragment: "sess-topic-topic-456.jsonl",
+      expectedPathFragment: `${path.sep}agents${path.sep}main${path.sep}sessions${path.sep}sess-topic.jsonl`,
     });
   });
 
