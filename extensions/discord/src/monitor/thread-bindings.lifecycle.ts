@@ -1,5 +1,9 @@
 import { readAcpSessionEntry, type AcpSessionStoreEntry } from "openclaw/plugin-sdk/acp-runtime";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-runtime";
+import {
+  normalizeOptionalLowercaseString,
+  normalizeOptionalString,
+} from "openclaw/plugin-sdk/text-runtime";
 import { parseDiscordTarget } from "../targets.js";
 import { resolveChannelIdForBinding } from "./thread-bindings.discord-api.js";
 import { getThreadBindingManager } from "./thread-bindings.manager.js";
@@ -7,11 +11,11 @@ import {
   resolveThreadBindingIntroText,
   resolveThreadBindingThreadName,
 } from "./thread-bindings.messages.js";
-import {
-  normalizeNonNegativeMs,
-  resolveBindingIdsForTargetSession,
-  updateBindingsForTargetSession,
-} from "./thread-bindings.session-shared.js";
+import { resolveBindingIdsForTargetSession } from "./thread-bindings.session-shared.js";
+export {
+  setThreadBindingIdleTimeoutBySessionKey,
+  setThreadBindingMaxAgeBySessionKey,
+} from "./thread-bindings.session-updates.js";
 import {
   BINDINGS_BY_THREAD_ID,
   MANAGERS_BY_ACCOUNT_ID,
@@ -104,7 +108,7 @@ export async function autoBindSpawnedDiscordSubagent(params: {
   label?: string;
   boundBy?: string;
 }): Promise<ThreadBindingRecord | null> {
-  const channel = params.channel?.trim().toLowerCase();
+  const channel = normalizeOptionalLowercaseString(params.channel);
   if (channel !== "discord") {
     return null;
   }
@@ -131,7 +135,7 @@ export async function autoBindSpawnedDiscordSubagent(params: {
     }
   }
   if (!channelId) {
-    const to = params.to?.trim() || "";
+    const to = normalizeOptionalString(params.to) ?? "";
     if (!to) {
       return null;
     }
@@ -217,35 +221,6 @@ export function unbindThreadBindingsBySessionKey(params: {
     saveBindingsToDisk({ force: true });
   }
   return removed;
-}
-
-export function setThreadBindingIdleTimeoutBySessionKey(params: {
-  targetSessionKey: string;
-  accountId?: string;
-  idleTimeoutMs: number;
-}): ThreadBindingRecord[] {
-  const ids = resolveBindingIdsForTargetSession(params);
-  const idleTimeoutMs = normalizeNonNegativeMs(params.idleTimeoutMs);
-  return updateBindingsForTargetSession(ids, (existing, now) => ({
-    ...existing,
-    idleTimeoutMs,
-    lastActivityAt: now,
-  }));
-}
-
-export function setThreadBindingMaxAgeBySessionKey(params: {
-  targetSessionKey: string;
-  accountId?: string;
-  maxAgeMs: number;
-}): ThreadBindingRecord[] {
-  const ids = resolveBindingIdsForTargetSession(params);
-  const maxAgeMs = normalizeNonNegativeMs(params.maxAgeMs);
-  return updateBindingsForTargetSession(ids, (existing, now) => ({
-    ...existing,
-    maxAgeMs,
-    boundAt: now,
-    lastActivityAt: now,
-  }));
 }
 
 function resolveStoredAcpBindingHealth(params: {

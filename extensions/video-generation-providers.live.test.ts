@@ -9,6 +9,7 @@ import { getShellEnvAppliedKeys, loadShellEnvFallback } from "../src/infra/shell
 import { encodePngRgba, fillPixel } from "../src/media/png-encode.js";
 import { getProviderEnvVars } from "../src/secrets/provider-env-vars.js";
 import {
+  canRunBufferBackedImageToVideoLiveLane,
   canRunBufferBackedVideoToVideoLiveLane,
   DEFAULT_LIVE_VIDEO_MODELS,
   parseCsvFilter,
@@ -16,6 +17,7 @@ import {
   redactLiveApiKey,
   resolveConfiguredLiveVideoModels,
   resolveLiveVideoAuthStore,
+  resolveLiveVideoResolution,
 } from "../src/video-generation/live-test-helpers.js";
 import { parseVideoGenerationModelRef } from "../src/video-generation/model-ref.js";
 import {
@@ -94,9 +96,9 @@ function withPluginsEnabled(cfg: OpenClawConfig): OpenClawConfig {
   };
 }
 
-function createEditReferencePng(): Buffer {
-  const width = 192;
-  const height = 192;
+function createEditReferencePng(params?: { width?: number; height?: number }): Buffer {
+  const width = params?.width ?? 384;
+  const height = params?.height ?? 384;
   const buf = Buffer.alloc(width * height * 4, 255);
 
   for (let y = 0; y < height; y += 1) {
@@ -105,14 +107,18 @@ function createEditReferencePng(): Buffer {
     }
   }
 
-  for (let y = 24; y < 168; y += 1) {
-    for (let x = 24; x < 168; x += 1) {
+  const outerInsetX = Math.max(1, Math.floor(width / 8));
+  const outerInsetY = Math.max(1, Math.floor(height / 8));
+  for (let y = outerInsetY; y < height - outerInsetY; y += 1) {
+    for (let x = outerInsetX; x < width - outerInsetX; x += 1) {
       fillPixel(buf, x, y, width, 76, 154, 255, 255);
     }
   }
 
-  for (let y = 48; y < 144; y += 1) {
-    for (let x = 48; x < 144; x += 1) {
+  const innerInsetX = Math.max(1, Math.floor(width / 4));
+  const innerInsetY = Math.max(1, Math.floor(height / 4));
+  for (let y = innerInsetY; y < height - innerInsetY; y += 1) {
+    for (let x = innerInsetX; x < width - innerInsetX; x += 1) {
       fillPixel(buf, x, y, width, 255, 255, 255, 255);
     }
   }
@@ -141,6 +147,19 @@ function maybeLoadShellEnvForVideoProviders(providerIds: string[]): void {
     expectedKeys,
     logger: { warn: (message: string) => console.warn(message) },
   });
+}
+
+function expectBufferedVideo(
+  video: { buffer?: Buffer; mimeType: string; fileName?: string } | undefined,
+): { buffer: Buffer; mimeType: string; fileName?: string } {
+  expect(video).toBeDefined();
+  expect(video?.mimeType.startsWith("video/")).toBe(true);
+  if (!video?.buffer) {
+    throw new Error("expected generated video buffer");
+  }
+  const { buffer, mimeType, fileName } = video;
+  expect(buffer.byteLength).toBeGreaterThan(1024);
+  return { buffer, mimeType, fileName };
 }
 
 describeLive("video generation provider live", () => {
@@ -200,6 +219,12 @@ describeLive("video generation provider live", () => {
         const imageToVideoCaps = provider.capabilities.imageToVideo;
         const videoToVideoCaps = provider.capabilities.videoToVideo;
         const durationSeconds = Math.min(generateCaps?.maxDurationSeconds ?? 3, 3);
+        const liveResolution = resolveLiveVideoResolution({
+          providerId: testCase.providerId,
+          modelRef,
+        });
+        const liveSize = testCase.providerId === "openai" ? "1280x720" : undefined;
+        const logPrefix = `[live:video-generation] provider=${testCase.providerId} model=${providerModel}`;
         let generatedVideo = null as {
           buffer: Buffer;
           mimeType: string;
@@ -207,6 +232,8 @@ describeLive("video generation provider live", () => {
         } | null;
 
         try {
+          const startedAt = Date.now();
+          console.error(`${logPrefix} mode=generate start auth=${authLabel}`);
           const result = await provider.generateVideo({
             provider: testCase.providerId,
             model: providerModel,
@@ -216,31 +243,48 @@ describeLive("video generation provider live", () => {
             agentDir,
             authStore,
             durationSeconds,
+            ...(generateCaps?.supportsSize && liveSize ? { size: liveSize } : {}),
             ...(generateCaps?.supportsAspectRatio ? { aspectRatio: "16:9" } : {}),
-            ...(generateCaps?.supportsResolution ? { resolution: "480P" as const } : {}),
+            ...(generateCaps?.supportsResolution ? { resolution: liveResolution } : {}),
             ...(generateCaps?.supportsAudio ? { audio: false } : {}),
             ...(generateCaps?.supportsWatermark ? { watermark: false } : {}),
           });
 
           expect(result.videos.length).toBeGreaterThan(0);
-          expect(result.videos[0]?.mimeType.startsWith("video/")).toBe(true);
-          expect(result.videos[0]?.buffer.byteLength).toBeGreaterThan(1024);
-          generatedVideo = result.videos[0] ?? null;
+          generatedVideo = expectBufferedVideo(result.videos[0]);
           attempted.push(`${testCase.providerId}:generate:${providerModel} (${authLabel})`);
-        } catch (error) {
-          failures.push(
-            `${testCase.providerId}:generate (${authLabel}): ${
-              error instanceof Error ? error.message : String(error)
-            }`,
+          console.error(
+            `${logPrefix} mode=generate done ms=${Date.now() - startedAt} videos=${result.videos.length}`,
           );
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          failures.push(`${testCase.providerId}:generate (${authLabel}): ${message}`);
+          console.error(`${logPrefix} mode=generate failed error=${message}`);
           continue;
         }
 
         if (!imageToVideoCaps?.enabled) {
           continue;
         }
+        if (
+          !canRunBufferBackedImageToVideoLiveLane({
+            providerId: testCase.providerId,
+            modelRef,
+          })
+        ) {
+          skipped.push(
+            `${testCase.providerId}:imageToVideo requires remote URL or model-specific input`,
+          );
+          continue;
+        }
 
         try {
+          const startedAt = Date.now();
+          console.error(`${logPrefix} mode=imageToVideo start auth=${authLabel}`);
+          const referenceImage =
+            testCase.providerId === "openai"
+              ? createEditReferencePng({ width: 1280, height: 720 })
+              : createEditReferencePng();
           const result = await provider.generateVideo({
             provider: testCase.providerId,
             model: providerModel,
@@ -250,29 +294,30 @@ describeLive("video generation provider live", () => {
             agentDir,
             authStore,
             durationSeconds,
+            ...(imageToVideoCaps.supportsSize && liveSize ? { size: liveSize } : {}),
             inputImages: [
               {
-                buffer: createEditReferencePng(),
+                buffer: referenceImage,
                 mimeType: "image/png",
                 fileName: "reference.png",
               },
             ],
             ...(imageToVideoCaps.supportsAspectRatio ? { aspectRatio: "16:9" } : {}),
-            ...(imageToVideoCaps.supportsResolution ? { resolution: "480P" as const } : {}),
+            ...(imageToVideoCaps.supportsResolution ? { resolution: liveResolution } : {}),
             ...(imageToVideoCaps.supportsAudio ? { audio: false } : {}),
             ...(imageToVideoCaps.supportsWatermark ? { watermark: false } : {}),
           });
 
           expect(result.videos.length).toBeGreaterThan(0);
-          expect(result.videos[0]?.mimeType.startsWith("video/")).toBe(true);
-          expect(result.videos[0]?.buffer.byteLength).toBeGreaterThan(1024);
+          expectBufferedVideo(result.videos[0]);
           attempted.push(`${testCase.providerId}:imageToVideo:${providerModel} (${authLabel})`);
-        } catch (error) {
-          failures.push(
-            `${testCase.providerId}:imageToVideo (${authLabel}): ${
-              error instanceof Error ? error.message : String(error)
-            }`,
+          console.error(
+            `${logPrefix} mode=imageToVideo done ms=${Date.now() - startedAt} videos=${result.videos.length}`,
           );
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          failures.push(`${testCase.providerId}:imageToVideo (${authLabel}): ${message}`);
+          console.error(`${logPrefix} mode=imageToVideo failed error=${message}`);
         }
 
         if (!videoToVideoCaps?.enabled) {
@@ -295,6 +340,8 @@ describeLive("video generation provider live", () => {
         }
 
         try {
+          const startedAt = Date.now();
+          console.error(`${logPrefix} mode=videoToVideo start auth=${authLabel}`);
           const result = await provider.generateVideo({
             provider: testCase.providerId,
             model: providerModel,
@@ -305,21 +352,21 @@ describeLive("video generation provider live", () => {
             durationSeconds: Math.min(videoToVideoCaps.maxDurationSeconds ?? durationSeconds, 3),
             inputVideos: [generatedVideo],
             ...(videoToVideoCaps.supportsAspectRatio ? { aspectRatio: "16:9" } : {}),
-            ...(videoToVideoCaps.supportsResolution ? { resolution: "480P" as const } : {}),
+            ...(videoToVideoCaps.supportsResolution ? { resolution: liveResolution } : {}),
             ...(videoToVideoCaps.supportsAudio ? { audio: false } : {}),
             ...(videoToVideoCaps.supportsWatermark ? { watermark: false } : {}),
           });
 
           expect(result.videos.length).toBeGreaterThan(0);
-          expect(result.videos[0]?.mimeType.startsWith("video/")).toBe(true);
-          expect(result.videos[0]?.buffer.byteLength).toBeGreaterThan(1024);
+          expectBufferedVideo(result.videos[0]);
           attempted.push(`${testCase.providerId}:videoToVideo:${providerModel} (${authLabel})`);
-        } catch (error) {
-          failures.push(
-            `${testCase.providerId}:videoToVideo (${authLabel}): ${
-              error instanceof Error ? error.message : String(error)
-            }`,
+          console.error(
+            `${logPrefix} mode=videoToVideo done ms=${Date.now() - startedAt} videos=${result.videos.length}`,
           );
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          failures.push(`${testCase.providerId}:videoToVideo (${authLabel}): ${message}`);
+          console.error(`${logPrefix} mode=videoToVideo failed error=${message}`);
         }
       }
 
@@ -328,6 +375,7 @@ describeLive("video generation provider live", () => {
       );
 
       if (attempted.length === 0) {
+        expect(failures).toEqual([]);
         console.warn("[live:video-generation] no provider had usable auth; skipping assertions");
         return;
       }

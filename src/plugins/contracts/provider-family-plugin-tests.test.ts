@@ -35,6 +35,9 @@ const EXPECTED_SHARED_FAMILY_CONTRACTS: Record<string, ExpectedSharedFamilyContr
   "amazon-bedrock": {
     replayFamilies: ["anthropic-by-model"],
   },
+  arcee: {
+    replayFamilies: ["openai-compatible"],
+  },
   fireworks: {
     replayFamilies: ["openai-compatible"],
   },
@@ -60,6 +63,7 @@ const EXPECTED_SHARED_FAMILY_CONTRACTS: Record<string, ExpectedSharedFamilyContr
   },
   openai: {
     streamFamilies: ["openai-responses-defaults"],
+    toolCompatFamilies: ["openai"],
   },
   opencode: {
     replayFamilies: ["passthrough-gemini"],
