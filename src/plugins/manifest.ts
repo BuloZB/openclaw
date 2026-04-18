@@ -47,6 +47,8 @@ export type PluginManifestActivation = {
    * This is metadata only; runtime loading still happens through the loader.
    */
   onProviders?: string[];
+  /** Agent harness runtime ids that should activate this plugin. */
+  onAgentHarnesses?: string[];
   /** Command ids that should activate this plugin. */
   onCommands?: string[];
   /** Channel ids that should activate this plugin. */
@@ -78,6 +80,13 @@ export type PluginManifestSetup = {
    * Defaults to false when omitted.
    */
   requiresRuntime?: boolean;
+};
+
+export type PluginManifestQaRunner = {
+  /** Subcommand mounted beneath `openclaw qa`, for example `matrix`. */
+  commandName: string;
+  /** Optional user-facing help text for fallback host stubs. */
+  description?: string;
 };
 
 export type PluginManifestConfigLiteral = string | number | boolean | null;
@@ -155,6 +164,16 @@ export type PluginManifest = {
   /** Cheap startup activation lookup for plugin-owned CLI inference backends. */
   cliBackends?: string[];
   /**
+   * Provider or CLI backend refs whose plugin-owned synthetic auth hook should
+   * be probed during cold model discovery before the runtime registry exists.
+   */
+  syntheticAuthRefs?: string[];
+  /**
+   * Bundled-plugin-owned placeholder API key values that represent non-secret
+   * local, OAuth, or ambient credential state.
+   */
+  nonSecretAuthMarkers?: string[];
+  /**
    * Plugin-owned command aliases that should resolve to this plugin during
    * config diagnostics before runtime loads.
    */
@@ -174,6 +193,8 @@ export type PluginManifest = {
   activation?: PluginManifestActivation;
   /** Cheap setup/onboarding metadata exposed before plugin runtime loads. */
   setup?: PluginManifestSetup;
+  /** Cheap QA runner metadata exposed before plugin runtime loads. */
+  qaRunners?: PluginManifestQaRunner[];
   skills?: string[];
   name?: string;
   description?: string;
@@ -418,6 +439,7 @@ function normalizeManifestActivation(value: unknown): PluginManifestActivation |
   }
 
   const onProviders = normalizeTrimmedStringList(value.onProviders);
+  const onAgentHarnesses = normalizeTrimmedStringList(value.onAgentHarnesses);
   const onCommands = normalizeTrimmedStringList(value.onCommands);
   const onChannels = normalizeTrimmedStringList(value.onChannels);
   const onRoutes = normalizeTrimmedStringList(value.onRoutes);
@@ -431,6 +453,7 @@ function normalizeManifestActivation(value: unknown): PluginManifestActivation |
 
   const activation = {
     ...(onProviders.length > 0 ? { onProviders } : {}),
+    ...(onAgentHarnesses.length > 0 ? { onAgentHarnesses } : {}),
     ...(onCommands.length > 0 ? { onCommands } : {}),
     ...(onChannels.length > 0 ? { onChannels } : {}),
     ...(onRoutes.length > 0 ? { onRoutes } : {}),
@@ -482,6 +505,28 @@ function normalizeManifestSetup(value: unknown): PluginManifestSetup | undefined
     ...(requiresRuntime !== undefined ? { requiresRuntime } : {}),
   } satisfies PluginManifestSetup;
   return Object.keys(setup).length > 0 ? setup : undefined;
+}
+
+function normalizeManifestQaRunners(value: unknown): PluginManifestQaRunner[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const normalized: PluginManifestQaRunner[] = [];
+  for (const entry of value) {
+    if (!isRecord(entry)) {
+      continue;
+    }
+    const commandName = normalizeOptionalString(entry.commandName) ?? "";
+    if (!commandName) {
+      continue;
+    }
+    const description = normalizeOptionalString(entry.description) ?? "";
+    normalized.push({
+      commandName,
+      ...(description ? { description } : {}),
+    });
+  }
+  return normalized.length > 0 ? normalized : undefined;
 }
 
 function normalizeProviderAuthChoices(
@@ -666,6 +711,8 @@ export function loadPluginManifest(
   const providerDiscoveryEntry = normalizeOptionalString(raw.providerDiscoveryEntry);
   const modelSupport = normalizeManifestModelSupport(raw.modelSupport);
   const cliBackends = normalizeTrimmedStringList(raw.cliBackends);
+  const syntheticAuthRefs = normalizeTrimmedStringList(raw.syntheticAuthRefs);
+  const nonSecretAuthMarkers = normalizeTrimmedStringList(raw.nonSecretAuthMarkers);
   const commandAliases = normalizeManifestCommandAliases(raw.commandAliases);
   const providerAuthEnvVars = normalizeStringListRecord(raw.providerAuthEnvVars);
   const providerAuthAliases = normalizeStringRecord(raw.providerAuthAliases);
@@ -673,6 +720,7 @@ export function loadPluginManifest(
   const providerAuthChoices = normalizeProviderAuthChoices(raw.providerAuthChoices);
   const activation = normalizeManifestActivation(raw.activation);
   const setup = normalizeManifestSetup(raw.setup);
+  const qaRunners = normalizeManifestQaRunners(raw.qaRunners);
   const skills = normalizeTrimmedStringList(raw.skills);
   const contracts = normalizeManifestContracts(raw.contracts);
   const configContracts = normalizeManifestConfigContracts(raw.configContracts);
@@ -699,6 +747,8 @@ export function loadPluginManifest(
       providerDiscoveryEntry,
       modelSupport,
       cliBackends,
+      syntheticAuthRefs,
+      nonSecretAuthMarkers,
       commandAliases,
       providerAuthEnvVars,
       providerAuthAliases,
@@ -706,6 +756,7 @@ export function loadPluginManifest(
       providerAuthChoices,
       activation,
       setup,
+      qaRunners,
       skills,
       name,
       description,
@@ -772,9 +823,15 @@ export type OpenClawPackageStartup = {
   deferConfiguredChannelFullLoadUntilAfterListen?: boolean;
 };
 
+export type OpenClawPackageSetupFeatures = {
+  legacyStateMigrations?: boolean;
+  legacySessionSurfaces?: boolean;
+};
+
 export type OpenClawPackageManifest = {
   extensions?: string[];
   setupEntry?: string;
+  setupFeatures?: OpenClawPackageSetupFeatures;
   channel?: PluginPackageChannel;
   install?: PluginPackageInstall;
   startup?: OpenClawPackageStartup;

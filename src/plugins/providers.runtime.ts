@@ -7,6 +7,7 @@ import {
   resolveRuntimePluginRegistry,
   type PluginLoadOptions,
 } from "./loader.js";
+import { hasExplicitPluginIdScope } from "./plugin-scope.js";
 import {
   resolveActivatableProviderOwnerPluginIds,
   resolveDiscoverableProviderOwnerPluginIds,
@@ -99,7 +100,7 @@ function resolvePluginProviderLoadBase(params: {
       })
     : [];
   const requestedPluginIds =
-    params.onlyPluginIds ||
+    hasExplicitPluginIdScope(params.onlyPluginIds) ||
     params.providerRefs?.length ||
     params.modelRefs?.length ||
     providerOwnedPluginIds.length > 0 ||
@@ -274,10 +275,9 @@ export function resolvePluginProviders(params: {
       return [];
     }
     const registry = loadOpenClawPlugins(loadState.loadOptions);
-    return registry.providers.map((entry) => ({
-      ...entry.provider,
-      pluginId: entry.pluginId,
-    }));
+    return registry.providers.map((entry) =>
+      Object.assign({}, entry.provider, { pluginId: entry.pluginId }),
+    );
   }
   const loadState = resolveRuntimeProviderPluginLoadState(params, base);
   const registry = resolveRuntimePluginRegistry(loadState.loadOptions);
@@ -285,8 +285,7 @@ export function resolvePluginProviders(params: {
     return [];
   }
 
-  return registry.providers.map((entry) => ({
-    ...entry.provider,
-    pluginId: entry.pluginId,
-  }));
+  return registry.providers.map((entry) =>
+    Object.assign({}, entry.provider, { pluginId: entry.pluginId }),
+  );
 }

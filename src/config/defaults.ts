@@ -15,7 +15,7 @@ let defaultWarnState: WarnState = { warned: false };
 
 const DEFAULT_MODEL_ALIASES: Readonly<Record<string, string>> = {
   // Anthropic (pi-ai catalog uses "latest" ids without date suffix)
-  opus: "anthropic/claude-opus-4-6",
+  opus: "anthropic/claude-opus-4-7",
   sonnet: "anthropic/claude-sonnet-4-6",
 
   // OpenAI
@@ -211,15 +211,14 @@ export function applyModelDefaults(cfg: OpenClawConfig): OpenClawConfig {
           return model;
         }
         providerMutated = true;
-        return {
-          ...raw,
+        return Object.assign({}, raw, {
           reasoning,
           input,
           cost,
           contextWindow,
           maxTokens,
           api,
-        } as ModelDefinitionConfig;
+        }) as ModelDefinitionConfig;
       });
 
       if (!providerMutated) {

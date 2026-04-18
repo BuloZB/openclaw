@@ -13,7 +13,15 @@ import {
   resetSystemEventsForTest,
 } from "../infra/system-events.js";
 import { captureEnv } from "../test-utils/env.js";
-import { getFinishedSession, resetProcessRegistryForTests } from "./bash-process-registry.js";
+import {
+  addSession,
+  appendOutput,
+  getFinishedSession,
+  markBackgrounded,
+  markExited,
+  resetProcessRegistryForTests,
+  type ProcessSession,
+} from "./bash-process-registry.js";
 import { createExecTool, createProcessTool } from "./bash-tools.js";
 import { resolveShellFromPath, sanitizeBinaryOutput } from "./shell-utils.js";
 
@@ -99,7 +107,6 @@ const withLabel = <T extends object>(label: string, fields: T): T & LabeledCase 
 // Both PowerShell and bash use ; for command separation
 const joinCommands = (commands: string[]) => commands.join("; ");
 const echoAfterDelay = (message: string) => joinCommands([shortDelayCmd, shellEcho(message)]);
-const echoLines = (lines: string[]) => joinCommands(lines.map((line) => shellEcho(line)));
 const normalizeText = (value?: string) =>
   sanitizeBinaryOutput(value ?? "")
     .replace(/\r\n/g, "\n")
@@ -230,6 +237,19 @@ async function waitForNotifyEvent(sessionId: string, sessionKey = DEFAULT_NOTIFY
 async function startBackgroundCommand(tool: ExecToolInstance, command: string) {
   const result = await executeExecCommand(tool, command, { background: true });
   return requireRunningSessionId(result);
+}
+
+async function expectNotifyOnExitWake(tool: ExecToolInstance, expected: Record<string, unknown>) {
+  const wakeHandler = vi.fn().mockResolvedValue({ status: "skipped", reason: "disabled" });
+  const dispose = setHeartbeatWakeHandler(
+    wakeHandler as unknown as Parameters<typeof setHeartbeatWakeHandler>[0],
+  );
+  try {
+    await startBackgroundCommand(tool, echoAfterDelay("notify"));
+    await expect.poll(() => wakeHandler.mock.calls[0]?.[0], NOTIFY_POLL_OPTIONS).toEqual(expected);
+  } finally {
+    dispose();
+  }
 }
 
 async function drainNotifyEvents(sessionKey = DEFAULT_NOTIFY_SESSION_KEY) {
@@ -388,7 +408,7 @@ const readBackgroundLogSnapshot = async (
   lines: string[],
   options: ProcessLogWindow = {},
 ): Promise<ProcessLogSnapshot> => {
-  const { sessionId } = await runBackgroundCommandToCompletion(execTool, echoLines(lines));
+  const sessionId = seedFinishedLogSession(lines);
   const log = await readProcessLog(sessionId, options);
   return {
     text: readTextContent(log.content) ?? "",
@@ -396,6 +416,31 @@ const readBackgroundLogSnapshot = async (
     lines: readTrimmedLines(log.content),
     totalLines: readTotalLines(log.details),
   };
+};
+const seedFinishedLogSession = (lines: string[]) => {
+  const session: ProcessSession = {
+    id: `seeded-log-${nextCallId()}`,
+    command: "seeded log",
+    startedAt: Date.now(),
+    maxOutputChars: 100_000,
+    pendingMaxOutputChars: 100_000,
+    pendingStdout: [],
+    pendingStderr: [],
+    pendingStdoutChars: 0,
+    pendingStderrChars: 0,
+    totalOutputChars: 0,
+    aggregated: "",
+    tail: "",
+    exited: false,
+    truncated: false,
+    backgrounded: false,
+    cursorKeyMode: "unknown",
+  };
+  addSession(session);
+  appendOutput(session, "stdout", lines.join("\n"));
+  markBackgrounded(session);
+  markExited(session, 0, null, PROCESS_STATUS_COMPLETED);
+  return session.id;
 };
 const runLongLogExpectationCase = async ({
   options,
@@ -606,42 +651,16 @@ describe("exec notifyOnExit", () => {
   });
 
   it("scopes notifyOnExit heartbeat wake to the exec session key", async () => {
-    const tool = createNotifyOnExitExecTool();
-    const wakeHandler = vi.fn().mockResolvedValue({ status: "skipped", reason: "disabled" });
-    const dispose = setHeartbeatWakeHandler(
-      wakeHandler as unknown as Parameters<typeof setHeartbeatWakeHandler>[0],
-    );
-    try {
-      const _sessionId = await startBackgroundCommand(tool, echoAfterDelay("notify"));
-
-      await expect
-        .poll(() => wakeHandler.mock.calls[0]?.[0], NOTIFY_POLL_OPTIONS)
-        .toMatchObject({
-          reason: "exec-event",
-          sessionKey: DEFAULT_NOTIFY_SESSION_KEY,
-        });
-    } finally {
-      dispose();
-    }
+    await expectNotifyOnExitWake(createNotifyOnExitExecTool(), {
+      reason: "exec-event",
+      sessionKey: DEFAULT_NOTIFY_SESSION_KEY,
+    });
   });
 
   it("keeps notifyOnExit heartbeat wake unscoped for non-agent session keys", async () => {
-    const tool = createNotifyOnExitExecTool({ sessionKey: "global" });
-    const wakeHandler = vi.fn().mockResolvedValue({ status: "skipped", reason: "disabled" });
-    const dispose = setHeartbeatWakeHandler(
-      wakeHandler as unknown as Parameters<typeof setHeartbeatWakeHandler>[0],
-    );
-    try {
-      const _sessionId = await startBackgroundCommand(tool, echoAfterDelay("notify"));
-
-      await expect
-        .poll(() => wakeHandler.mock.calls[0]?.[0], NOTIFY_POLL_OPTIONS)
-        .toEqual({
-          reason: "exec-event",
-        });
-    } finally {
-      dispose();
-    }
+    await expectNotifyOnExitWake(createNotifyOnExitExecTool({ sessionKey: "global" }), {
+      reason: "exec-event",
+    });
   });
 
   it.each<NotifyNoopCase>(NOOP_NOTIFY_CASES)("$label", runNotifyNoopCase);
@@ -768,7 +787,7 @@ describe("exec backgrounded onUpdate suppression", () => {
       await execTool.execute(nextCallId(), { command }, undefined, onUpdateSpy);
       const callsAtExit = onUpdateSpy.mock.calls.length;
       // Allow a tick for any straggling stdout data events.
-      await new Promise((r) => setTimeout(r, 50));
+      await new Promise((r) => setTimeout(r, 5));
       expect(onUpdateSpy.mock.calls.length).toBe(callsAtExit);
     },
     isWin ? 10_000 : 5_000,
@@ -795,8 +814,8 @@ describe("exec backgrounded onUpdate suppression", () => {
         onUpdateSpy,
       );
       const callsAtAbort = onUpdateSpy.mock.calls.length;
-      // Allow extra time for any straggling stdout data events.
-      await new Promise((r) => setTimeout(r, 100));
+      // Allow a tick for any straggling stdout data events.
+      await new Promise((r) => setTimeout(r, 5));
       // After abort, no new onUpdate calls should have been made.
       expect(onUpdateSpy.mock.calls.length).toBe(callsAtAbort);
       expect(result).toBeDefined();

@@ -15,6 +15,10 @@ import {
 } from "./config-policy.js";
 import { discoverOpenClawPlugins, type PluginCandidate } from "./discovery.js";
 import type { PluginManifestCommandAlias } from "./manifest-command-aliases.js";
+import {
+  clearPluginManifestRegistryCache,
+  pluginManifestRegistryCache,
+} from "./manifest-registry-state.js";
 import type {
   PluginBundleFormat,
   PluginConfigUiHint,
@@ -30,6 +34,7 @@ import {
   type PluginManifestChannelConfig,
   type PluginManifestContracts,
   type PluginManifestModelSupport,
+  type PluginManifestQaRunner,
   type PluginManifestSetup,
 } from "./manifest.js";
 import { checkMinHostVersion } from "./min-host-version.js";
@@ -81,6 +86,8 @@ export type PluginManifestRecord = {
   providerDiscoverySource?: string;
   modelSupport?: PluginManifestModelSupport;
   cliBackends: string[];
+  syntheticAuthRefs?: string[];
+  nonSecretAuthMarkers?: string[];
   commandAliases?: PluginManifestCommandAlias[];
   providerAuthEnvVars?: Record<string, string[]>;
   providerAuthAliases?: Record<string, string>;
@@ -88,6 +95,7 @@ export type PluginManifestRecord = {
   providerAuthChoices?: PluginManifest["providerAuthChoices"];
   activation?: PluginManifestActivation;
   setup?: PluginManifestSetup;
+  qaRunners?: PluginManifestQaRunner[];
   skills: string[];
   settingsFiles?: string[];
   hooks: string[];
@@ -117,14 +125,15 @@ export type PluginManifestRegistry = {
   diagnostics: PluginDiagnostic[];
 };
 
-const registryCache = new Map<string, { expiresAt: number; registry: PluginManifestRegistry }>();
+const registryCache = pluginManifestRegistryCache as Map<
+  string,
+  { expiresAt: number; registry: PluginManifestRegistry }
+>;
 
 // Keep a short cache window to collapse bursty reloads during startup flows.
 const DEFAULT_MANIFEST_CACHE_MS = 1000;
 
-export function clearPluginManifestRegistryCache(): void {
-  registryCache.clear();
-}
+export { clearPluginManifestRegistryCache } from "./manifest-registry-state.js";
 
 function listContractValues(
   plugin: PluginManifestRecord,
@@ -321,6 +330,8 @@ function buildRecord(params: {
       : undefined,
     modelSupport: params.manifest.modelSupport,
     cliBackends: params.manifest.cliBackends ?? [],
+    syntheticAuthRefs: params.manifest.syntheticAuthRefs ?? [],
+    nonSecretAuthMarkers: params.manifest.nonSecretAuthMarkers ?? [],
     commandAliases: params.manifest.commandAliases,
     providerAuthEnvVars: params.manifest.providerAuthEnvVars,
     providerAuthAliases: params.manifest.providerAuthAliases,
@@ -328,6 +339,7 @@ function buildRecord(params: {
     providerAuthChoices: params.manifest.providerAuthChoices,
     activation: params.manifest.activation,
     setup: params.manifest.setup,
+    qaRunners: params.manifest.qaRunners,
     skills: params.manifest.skills ?? [],
     settingsFiles: [],
     hooks: [],
@@ -390,6 +402,8 @@ function buildBundleRecord(params: {
     channels: [],
     providers: [],
     cliBackends: [],
+    syntheticAuthRefs: [],
+    nonSecretAuthMarkers: [],
     skills: params.manifest.skills ?? [],
     settingsFiles: params.manifest.settingsFiles ?? [],
     hooks: params.manifest.hooks ?? [],

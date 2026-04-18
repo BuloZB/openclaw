@@ -4,10 +4,12 @@ import { normalizeOptionalLowercaseString } from "../shared/string-coerce.js";
 import { loadPluginManifestRegistry, type PluginManifestRecord } from "./manifest-registry.js";
 import type { PluginManifestActivationCapability } from "./manifest.js";
 import type { PluginOrigin } from "./plugin-origin.types.js";
+import { createPluginIdScopeSet, normalizePluginIdScope } from "./plugin-scope.js";
 
 export type PluginActivationPlannerTrigger =
   | { kind: "command"; command: string }
   | { kind: "provider"; provider: string }
+  | { kind: "agentHarness"; runtime: string }
   | { kind: "channel"; channel: string }
   | { kind: "route"; route: string }
   | { kind: "capability"; capability: PluginManifestActivationCapability };
@@ -17,13 +19,11 @@ export function resolveManifestActivationPluginIds(params: {
   config?: OpenClawConfig;
   workspaceDir?: string;
   env?: NodeJS.ProcessEnv;
+  cache?: boolean;
   origin?: PluginOrigin;
   onlyPluginIds?: readonly string[];
 }): string[] {
-  const onlyPluginIds =
-    params.onlyPluginIds && params.onlyPluginIds.length > 0
-      ? new Set(params.onlyPluginIds.map((pluginId) => pluginId.trim()).filter(Boolean))
-      : null;
+  const onlyPluginIdSet = createPluginIdScopeSet(normalizePluginIdScope(params.onlyPluginIds));
 
   return [
     ...new Set(
@@ -31,11 +31,12 @@ export function resolveManifestActivationPluginIds(params: {
         config: params.config,
         workspaceDir: params.workspaceDir,
         env: params.env,
+        cache: params.cache,
       })
         .plugins.filter(
           (plugin) =>
             (!params.origin || plugin.origin === params.origin) &&
-            (!onlyPluginIds || onlyPluginIds.has(plugin.id)) &&
+            (!onlyPluginIdSet || onlyPluginIdSet.has(plugin.id)) &&
             matchesManifestActivationTrigger(plugin, params.trigger),
         )
         .map((plugin) => plugin.id),
@@ -52,6 +53,8 @@ function matchesManifestActivationTrigger(
       return listActivationCommandIds(plugin).includes(normalizeCommandId(trigger.command));
     case "provider":
       return listActivationProviderIds(plugin).includes(normalizeProviderId(trigger.provider));
+    case "agentHarness":
+      return listActivationAgentHarnessIds(plugin).includes(normalizeCommandId(trigger.runtime));
     case "channel":
       return listActivationChannelIds(plugin).includes(normalizeCommandId(trigger.channel));
     case "route":
@@ -61,6 +64,10 @@ function matchesManifestActivationTrigger(
   }
   const unreachableTrigger: never = trigger;
   return unreachableTrigger;
+}
+
+function listActivationAgentHarnessIds(plugin: PluginManifestRecord): string[] {
+  return [...(plugin.activation?.onAgentHarnesses ?? [])].map(normalizeCommandId).filter(Boolean);
 }
 
 function listActivationCommandIds(plugin: PluginManifestRecord): string[] {
