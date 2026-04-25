@@ -1,7 +1,7 @@
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { resolveProviderModernModelRef } from "../plugins/provider-runtime.js";
-import { resolveOwningPluginIdsForProvider } from "../plugins/providers.js";
 import { normalizeLowercaseStringOrEmpty } from "../shared/string-coerce.js";
+import { liveProvidersShareOwningPlugin } from "./live-provider-owner.js";
 import { normalizeProviderId } from "./provider-id.js";
 
 export type ModelRef = {
@@ -15,6 +15,8 @@ const HIGH_SIGNAL_LIVE_MODEL_PRIORITY = [
   "anthropic/claude-sonnet-4-6",
   "google/gemini-3.1-pro-preview",
   "google/gemini-3-flash-preview",
+  "deepseek/deepseek-v4-flash",
+  "deepseek/deepseek-v4-pro",
   "minimax/minimax-m2.7",
   "openai/gpt-5.2",
   "openai-codex/gpt-5.2",
@@ -22,6 +24,7 @@ const HIGH_SIGNAL_LIVE_MODEL_PRIORITY = [
   "openrouter/ai21/jamba-large-1.7",
   "xai/grok-4-1-fast-non-reasoning",
   "zai/glm-4.7",
+  "fireworks/accounts/fireworks/models/kimi-k2p6",
   "fireworks/accounts/fireworks/routers/kimi-k2p5-turbo",
   "minimax-portal/minimax-m2.7",
 ] as const;
@@ -69,6 +72,38 @@ function isPreGemini3ModelId(id: string): boolean {
   return Number.isFinite(major) && major < 3;
 }
 
+function isOpenAiFamilyLiveModel(provider: string, id: string): boolean {
+  const normalized = normalizeLowercaseStringOrEmpty(id);
+  const modelName = normalized.split("/").pop() ?? "";
+  if (provider === "openrouter") {
+    return normalized.startsWith("openai/");
+  }
+  if (provider === "opencode") {
+    return modelName.startsWith("gpt-");
+  }
+  return (
+    provider === "openai" ||
+    provider === "openai-codex" ||
+    provider === "codex-cli" ||
+    provider === "opencode" ||
+    provider === "github-copilot" ||
+    provider === "microsoft-foundry"
+  );
+}
+
+function isUnsupportedOpenAiLiveModelRef(provider: string, id: string): boolean {
+  if (!isOpenAiFamilyLiveModel(provider, id)) {
+    return false;
+  }
+  const modelName = normalizeLowercaseStringOrEmpty(id).split("/").pop() ?? "";
+  return !modelName.startsWith("gpt-5.2");
+}
+
+function isOldMiniMaxLiveModelRef(id: string): boolean {
+  const modelName = normalizeLowercaseStringOrEmpty(id).split("/").pop() ?? "";
+  return modelName === "minimax-m2.1" || modelName.startsWith("minimax-m2.1:");
+}
+
 export function isModernModelRef(ref: ModelRef): boolean {
   const provider = normalizeProviderId(ref.provider ?? "");
   const id = normalizeLowercaseStringOrEmpty(ref.id);
@@ -90,6 +125,7 @@ export function isModernModelRef(ref: ModelRef): boolean {
 }
 
 export function isHighSignalLiveModelRef(ref: ModelRef): boolean {
+  const provider = normalizeProviderId(ref.provider ?? "");
   const id = normalizeLowercaseStringOrEmpty(ref.id);
   if (!isModernModelRef(ref) || !id) {
     return false;
@@ -97,37 +133,13 @@ export function isHighSignalLiveModelRef(ref: ModelRef): boolean {
   if (isPreGemini3ModelId(id)) {
     return false;
   }
+  if (isUnsupportedOpenAiLiveModelRef(provider, id)) {
+    return false;
+  }
+  if (isOldMiniMaxLiveModelRef(id)) {
+    return false;
+  }
   return isHighSignalClaudeModelId(id);
-}
-
-function sharesOwningPlugin(params: {
-  left: string;
-  right: string;
-  config?: OpenClawConfig;
-  workspaceDir?: string;
-  env?: NodeJS.ProcessEnv;
-  ownerCache: Map<string, readonly string[]>;
-}): boolean {
-  const resolveOwners = (provider: string): readonly string[] => {
-    const normalized = normalizeProviderId(provider);
-    const cached = params.ownerCache.get(normalized);
-    if (cached) {
-      return cached;
-    }
-    const owners =
-      resolveOwningPluginIdsForProvider({
-        provider: normalized,
-        config: params.config,
-        workspaceDir: params.workspaceDir,
-        env: params.env,
-      }) ?? [];
-    params.ownerCache.set(normalized, owners);
-    return owners;
-  };
-
-  const leftOwners = resolveOwners(params.left);
-  const rightOwners = resolveOwners(params.right);
-  return leftOwners.some((owner) => rightOwners.includes(owner));
 }
 
 export function shouldExcludeProviderFromDefaultHighSignalLiveSweep(params: {
@@ -153,9 +165,7 @@ export function shouldExcludeProviderFromDefaultHighSignalLiveSweep(params: {
     }
     if (
       requestedProvider &&
-      sharesOwningPlugin({
-        left: requestedProvider,
-        right: provider,
+      liveProvidersShareOwningPlugin(requestedProvider, provider, {
         config: params.config,
         workspaceDir: params.workspaceDir,
         env: params.env,

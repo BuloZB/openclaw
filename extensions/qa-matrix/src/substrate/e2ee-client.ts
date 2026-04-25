@@ -17,7 +17,7 @@ import type {
   MessageEventContent,
 } from "@openclaw/matrix/test-api.js";
 import { buildMatrixQaMessageContent } from "./client.js";
-import { normalizeMatrixQaObservedEvent } from "./events.js";
+import { findMatrixQaObservedEventMatch, normalizeMatrixQaObservedEvent } from "./events.js";
 import type { MatrixQaObservedEvent } from "./events.js";
 import type { MatrixQaRoomEventWaitResult } from "./sync.js";
 
@@ -46,8 +46,10 @@ const MATRIX_QA_E2EE_SYNC_FILTER = {
 export type MatrixQaE2eeScenarioClient = {
   acceptVerification(id: string): Promise<MatrixVerificationSummary>;
   bootstrapOwnDeviceVerification(params?: {
+    allowAutomaticCrossSigningReset?: boolean;
     forceResetCrossSigning?: boolean;
     recoveryKey?: string;
+    verifyOwnIdentity?: boolean;
   }): Promise<MatrixVerificationBootstrapResult>;
   confirmVerificationReciprocateQr(id: string): Promise<MatrixVerificationSummary>;
   confirmVerificationSas(id: string): Promise<MatrixVerificationSummary>;
@@ -71,7 +73,9 @@ export type MatrixQaE2eeScenarioClient = {
     roomId?: string;
     userId?: string;
   }): Promise<MatrixVerificationSummary>;
-  resetRoomKeyBackup(): Promise<MatrixRoomKeyBackupResetResult>;
+  resetRoomKeyBackup(params?: {
+    rotateRecoveryKey?: boolean;
+  }): Promise<MatrixRoomKeyBackupResetResult>;
   restoreRoomKeyBackup(params?: {
     recoveryKey?: string;
   }): Promise<MatrixRoomKeyBackupRestoreResult>;
@@ -184,27 +188,6 @@ async function createMatrixQaE2eeMatrixClient(params: MatrixQaE2eeClientParams) 
     syncFilter: MATRIX_QA_E2EE_SYNC_FILTER,
     userId: params.userId,
   });
-}
-
-function findMatrixQaObservedEventMatch(params: {
-  cursorIndex: number;
-  events: MatrixQaObservedEvent[];
-  predicate: (event: MatrixQaObservedEvent) => boolean;
-  roomId: string;
-}) {
-  for (let index = params.cursorIndex; index < params.events.length; index += 1) {
-    const event = params.events[index];
-    if (event?.roomId !== params.roomId) {
-      continue;
-    }
-    if (params.predicate(event)) {
-      return {
-        event,
-        nextCursorIndex: index + 1,
-      };
-    }
-  }
-  return undefined;
 }
 
 export async function createMatrixQaE2eeScenarioClient(
@@ -320,8 +303,8 @@ export async function createMatrixQaE2eeScenarioClient(
     async requestVerification(opts) {
       return await requireCrypto().requestVerification(opts);
     },
-    async resetRoomKeyBackup() {
-      return await client.resetRoomKeyBackup();
+    async resetRoomKeyBackup(params) {
+      return await client.resetRoomKeyBackup(params);
     },
     async restoreRoomKeyBackup(opts) {
       return await client.restoreRoomKeyBackup(opts);

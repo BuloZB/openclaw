@@ -21,7 +21,13 @@ import { mergeSessionEntry, type SessionEntry } from "./types.js";
 
 describe("session path safety", () => {
   it("rejects unsafe session IDs", () => {
-    const unsafeSessionIds = ["../etc/passwd", "a/b", "a\\b", "/abs"];
+    const unsafeSessionIds = [
+      "../etc/passwd",
+      "a/b",
+      "a\\b",
+      "/abs",
+      "sess.checkpoint.11111111-1111-4111-8111-111111111111",
+    ];
     for (const sessionId of unsafeSessionIds) {
       expect(() => validateSessionId(sessionId), sessionId).toThrow(/Invalid session ID/);
     }
@@ -176,7 +182,7 @@ describe("session store lock (Promise chain mutex)", () => {
   it("serializes concurrent updateSessionStore calls without data loss", async () => {
     const key = "agent:main:test";
     const { storePath } = await makeTmpStore({
-      [key]: { sessionId: "s1", updatedAt: 100, counter: 0 },
+      [key]: { sessionId: "s1", updatedAt: Date.now(), counter: 0 },
     });
 
     const N = 4;
@@ -216,7 +222,7 @@ describe("session store lock (Promise chain mutex)", () => {
   it("multiple consecutive errors do not permanently poison the queue", async () => {
     const key = "agent:main:multi-err";
     const { storePath } = await makeTmpStore({
-      [key]: { sessionId: "s1", updatedAt: 100 },
+      [key]: { sessionId: "s1", updatedAt: Date.now() },
     });
 
     const errors = Array.from({ length: 3 }, (_, i) =>
@@ -287,7 +293,7 @@ describe("session store lock (Promise chain mutex)", () => {
     const { storePath } = await makeTmpStore({
       [key]: {
         sessionId: "sess-acp",
-        updatedAt: 100,
+        updatedAt: Date.now(),
         acp,
       },
     });
@@ -295,7 +301,7 @@ describe("session store lock (Promise chain mutex)", () => {
     await updateSessionStore(storePath, (store) => {
       store[key] = {
         sessionId: "sess-acp",
-        updatedAt: 200,
+        updatedAt: Date.now(),
         modelProvider: "openai-codex",
         model: "gpt-5.4",
       };
