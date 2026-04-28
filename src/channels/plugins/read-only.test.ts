@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { afterAll, afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import {
   cleanupPluginLoaderFixturesForTest,
   EMPTY_PLUGIN_SCHEMA,
@@ -9,6 +9,15 @@ import {
   useNoBundledPlugins,
 } from "../../plugins/loader.test-fixtures.js";
 import { listReadOnlyChannelPluginsForConfig } from "./read-only.js";
+
+vi.mock("../../plugins/bundled-dir.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../plugins/bundled-dir.js")>();
+  return {
+    ...actual,
+    resolveBundledPluginsDir: (env: NodeJS.ProcessEnv = process.env) =>
+      env.OPENCLAW_BUNDLED_PLUGINS_DIR ?? actual.resolveBundledPluginsDir(env),
+  };
+});
 
 function writeExternalSetupChannelPlugin(
   options: {
@@ -538,6 +547,7 @@ describe("listReadOnlyChannelPluginsForConfig", () => {
       {
         env: { ...process.env },
         includePersistedAuthState: false,
+        includeSetupRuntimeFallback: true,
       },
     );
 
@@ -715,6 +725,7 @@ describe("listReadOnlyChannelPluginsForConfig", () => {
       {
         env: { ...process.env },
         includePersistedAuthState: false,
+        includeSetupRuntimeFallback: true,
       },
     );
 
@@ -833,6 +844,31 @@ describe("listReadOnlyChannelPluginsForConfig", () => {
       {
         env: { ...process.env, [envVar]: "configured" },
         includePersistedAuthState: false,
+      },
+    );
+
+    const plugin = plugins.find((entry) => entry.id === channelId);
+    expect(plugin?.meta.blurb).toBe("bundled setup entry");
+    expect(fs.existsSync(setupMarker)).toBe(false);
+    expect(fs.existsSync(fullMarker)).toBe(false);
+  });
+
+  it("loads bundled setup runtime only when explicitly requested", () => {
+    const { channelId, envVar, fullMarker, pluginId, setupMarker } =
+      writeBundledSetupChannelPlugin();
+    const plugins = listReadOnlyChannelPluginsForConfig(
+      {
+        plugins: {
+          allow: [pluginId],
+          entries: {
+            [pluginId]: { enabled: true },
+          },
+        },
+      } as never,
+      {
+        env: { ...process.env, [envVar]: "configured" },
+        includePersistedAuthState: false,
+        includeSetupRuntimeFallback: true,
       },
     );
 
