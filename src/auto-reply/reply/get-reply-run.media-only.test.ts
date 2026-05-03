@@ -302,7 +302,7 @@ describe("runPreparedReply media-only handling", () => {
     expect(call?.followupRun.run.allowEmptyAssistantReplyAsSilent).toBe(true);
   });
 
-  it("does not propagate empty-assistant silence for direct runs", async () => {
+  it("keeps empty-assistant silence disabled for direct runs by default", async () => {
     await runPreparedReply(
       baseParams({
         ctx: {
@@ -323,6 +323,85 @@ describe("runPreparedReply media-only handling", () => {
           ChatType: "direct",
           OriginatingChannel: "slack",
           OriginatingTo: "D123",
+        },
+      }),
+    );
+
+    const call = vi.mocked(runReplyAgent).mock.calls.at(-1)?.[0];
+    expect(call?.followupRun.run.allowEmptyAssistantReplyAsSilent).toBe(false);
+  });
+
+  it.each(["direct", "dm"] as const)(
+    "propagates empty-assistant silence for %s runs with explicit direct silent replies",
+    async (chatType) => {
+      await runPreparedReply(
+        baseParams({
+          ctx: {
+            Body: "",
+            RawBody: "",
+            CommandBody: "",
+            ThreadHistoryBody: "Earlier direct message",
+            OriginatingChannel: "slack",
+            OriginatingTo: "D123",
+            ChatType: chatType,
+          },
+          sessionCtx: {
+            Body: "",
+            BodyStripped: "",
+            ThreadHistoryBody: "Earlier direct message",
+            MediaPath: "/tmp/input.png",
+            Provider: "slack",
+            ChatType: chatType,
+            OriginatingChannel: "slack",
+            OriginatingTo: "D123",
+          },
+          cfg: {
+            session: {},
+            channels: {},
+            agents: {
+              defaults: {
+                silentReply: {
+                  direct: "allow",
+                },
+              },
+            },
+          },
+        }),
+      );
+
+      const call = vi.mocked(runReplyAgent).mock.calls.at(-1)?.[0];
+      expect(call?.followupRun.run.allowEmptyAssistantReplyAsSilent).toBe(true);
+    },
+  );
+
+  it("does not borrow target-session silence for native commands sent from direct chats", async () => {
+    await runPreparedReply(
+      baseParams({
+        sessionKey: "agent:main:telegram:group:target",
+        ctx: {
+          Body: "",
+          RawBody: "",
+          CommandBody: "",
+          ThreadHistoryBody: "Earlier direct message",
+          OriginatingChannel: "telegram",
+          OriginatingTo: "D123",
+          ChatType: "direct",
+          CommandSource: "native",
+          SessionKey: "agent:main:telegram:direct:source",
+          CommandTargetSessionKey: "agent:main:telegram:group:target",
+        },
+        sessionCtx: {
+          Body: "",
+          BodyStripped: "",
+          ThreadHistoryBody: "Earlier direct message",
+          MediaPath: "/tmp/input.png",
+          Provider: "telegram",
+          ChatType: "direct",
+          OriginatingChannel: "telegram",
+          OriginatingTo: "D123",
+          CommandSource: "native",
+          SessionKey: "agent:main:telegram:direct:source",
+          CommandTargetSessionKey: "agent:main:telegram:group:target",
         },
       }),
     );
@@ -777,6 +856,32 @@ describe("runPreparedReply media-only handling", () => {
 
     await expect(runPromise).resolves.toEqual({ text: "ok" });
     expect(vi.mocked(runReplyAgent)).toHaveBeenCalledOnce();
+  });
+  it("treats reset-triggered steer mode as interrupt when the session lane is empty", async () => {
+    const queueSettings = await import("./queue/settings-runtime.js");
+    const piRuntime = await import("../../agents/pi-embedded.runtime.js");
+    const commandQueue = await import("../../process/command-queue.js");
+    vi.mocked(queueSettings.resolveQueueSettings).mockReturnValueOnce({ mode: "steer" });
+    vi.mocked(commandQueue.getQueueSize).mockReturnValueOnce(0);
+    vi.mocked(piRuntime.resolveActiveEmbeddedRunSessionId).mockReturnValue("session-active");
+    vi.mocked(piRuntime.abortEmbeddedPiRun).mockReturnValue(true);
+
+    const result = await runPreparedReply(
+      baseParams({
+        resetTriggered: true,
+        isNewSession: true,
+        sessionId: "session-reset-new",
+      }),
+    );
+
+    expect(result).toEqual({ text: "ok" });
+    expect(commandQueue.clearCommandLane).toHaveBeenCalledWith("session:session-key");
+    expect(piRuntime.abortEmbeddedPiRun).toHaveBeenCalledWith("session-active");
+    expect(vi.mocked(runReplyAgent)).toHaveBeenCalledOnce();
+    const call = vi.mocked(runReplyAgent).mock.calls[0]?.[0];
+    expect(call?.shouldSteer).toBe(false);
+    expect(call?.shouldFollowup).toBe(false);
+    expect(call?.resetTriggered).toBe(true);
   });
   it("rechecks same-session ownership after async prep before registering a new reply operation", async () => {
     const { resolveSessionAuthProfileOverride } =

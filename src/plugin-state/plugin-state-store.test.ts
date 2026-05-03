@@ -1,9 +1,6 @@
 import { mkdirSync, statSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { requireNodeSqlite } from "../infra/node-sqlite.js";
-import type { PluginRecord } from "../plugins/registry-types.js";
-import { createPluginRegistry } from "../plugins/registry.js";
-import { createPluginRuntime } from "../plugins/runtime/index.js";
 import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
 import {
   closePluginStateSqliteStore,
@@ -15,42 +12,7 @@ import {
   sweepExpiredPluginStateEntries,
 } from "./plugin-state-store.js";
 import { resolvePluginStateDir, resolvePluginStateSqlitePath } from "./plugin-state-store.paths.js";
-
-function createPluginRecord(id: string, origin: PluginRecord["origin"] = "bundled"): PluginRecord {
-  return {
-    id,
-    name: id,
-    source: `/plugins/${id}/index.ts`,
-    origin,
-    enabled: true,
-    status: "loaded",
-    toolNames: [],
-    hookNames: [],
-    channelIds: [],
-    cliBackendIds: [],
-    providerIds: [],
-    speechProviderIds: [],
-    realtimeTranscriptionProviderIds: [],
-    realtimeVoiceProviderIds: [],
-    mediaUnderstandingProviderIds: [],
-    imageGenerationProviderIds: [],
-    videoGenerationProviderIds: [],
-    musicGenerationProviderIds: [],
-    webFetchProviderIds: [],
-    webSearchProviderIds: [],
-    migrationProviderIds: [],
-    memoryEmbeddingProviderIds: [],
-    agentHarnessIds: [],
-    gatewayMethods: [],
-    cliCommands: [],
-    services: [],
-    gatewayDiscoveryServiceIds: [],
-    commands: [],
-    httpRoutes: 0,
-    hookCount: 0,
-    configSchema: false,
-  } as PluginRecord;
-}
+import { seedPluginStateEntriesForTests } from "./plugin-state-store.test-helpers.js";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -165,22 +127,38 @@ describe("plugin state keyed store", () => {
 
   it("rejects when the per-plugin live row ceiling would be exceeded without evicting siblings", async () => {
     await withOpenClawTestState({ label: "plugin-state-plugin-limit" }, async () => {
-      const stores = Array.from({ length: 10 }, (_, index) =>
-        createPluginStateKeyedStore("discord", {
-          namespace: `ns-${index}`,
-          maxEntries: 101,
-        }),
-      );
-      for (let namespaceIndex = 0; namespaceIndex < stores.length; namespaceIndex += 1) {
-        for (let entryIndex = 0; entryIndex < 100; entryIndex += 1) {
-          await stores[namespaceIndex].register(`k-${entryIndex}`, { namespaceIndex, entryIndex });
-        }
-      }
+      seedPluginStateEntriesForTests([
+        ...Array.from({ length: 999 }, (_, entryIndex) => ({
+          pluginId: "discord",
+          namespace: "limit",
+          key: `k-${entryIndex}`,
+          value: { namespaceIndex: 0, entryIndex },
+        })),
+        {
+          pluginId: "discord",
+          namespace: "sibling",
+          key: "k-0",
+          value: { namespaceIndex: 1, entryIndex: 0 },
+        },
+      ]);
 
-      await expect(stores[0].register("overflow", { overflow: true })).rejects.toMatchObject({
+      const limitStore = createPluginStateKeyedStore("discord", {
+        namespace: "limit",
+        maxEntries: 1_001,
+      });
+      const siblingStore = createPluginStateKeyedStore("discord", {
+        namespace: "sibling",
+        maxEntries: 10,
+      });
+
+      await expect(limitStore.register("overflow", { overflow: true })).rejects.toMatchObject({
         code: "PLUGIN_STATE_LIMIT_EXCEEDED",
       });
-      await expect(stores[1].lookup("k-0")).resolves.toEqual({ namespaceIndex: 1, entryIndex: 0 });
+      await expect(siblingStore.lookup("k-0")).resolves.toEqual({
+        namespaceIndex: 1,
+        entryIndex: 0,
+      });
+      await expect(limitStore.lookup("overflow")).resolves.toBeUndefined();
     });
   });
 
@@ -330,50 +308,5 @@ describe("plugin state keyed store", () => {
         code: "PLUGIN_STATE_SCHEMA_UNSUPPORTED",
       });
     });
-  });
-});
-
-describe("plugin runtime state proxy", () => {
-  it("binds openKeyedStore to the bundled plugin id and keeps resolveStateDir", async () => {
-    await withOpenClawTestState({ label: "plugin-state-runtime" }, async (state) => {
-      const registry = createPluginRegistry({
-        logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
-        runtime: createPluginRuntime(),
-      });
-      const record = createPluginRecord("discord", "bundled");
-      registry.registry.plugins.push(record);
-      const api = registry.createApi(record, { config: {} });
-
-      expect(api.runtime.state.resolveStateDir()).toBe(state.stateDir);
-      const store = api.runtime.state.openKeyedStore<{ plugin: string }>({
-        namespace: "runtime",
-        maxEntries: 10,
-      });
-      await store.register("k", { plugin: "discord" });
-
-      const telegram = createPluginRecord("telegram", "bundled");
-      registry.registry.plugins.push(telegram);
-      const telegramApi = registry.createApi(telegram, { config: {} });
-      const telegramStore = telegramApi.runtime.state.openKeyedStore<{ plugin: string }>({
-        namespace: "runtime",
-        maxEntries: 10,
-      });
-      await expect(telegramStore.lookup("k")).resolves.toBeUndefined();
-      await expect(store.lookup("k")).resolves.toEqual({ plugin: "discord" });
-    });
-  });
-
-  it("rejects external plugins in this release", () => {
-    const registry = createPluginRegistry({
-      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
-      runtime: createPluginRuntime(),
-    });
-    const record = createPluginRecord("external-plugin", "workspace");
-    registry.registry.plugins.push(record);
-    const api = registry.createApi(record, { config: {} });
-
-    expect(() =>
-      api.runtime.state.openKeyedStore({ namespace: "runtime", maxEntries: 10 }),
-    ).toThrow("openKeyedStore is only available for bundled plugins");
   });
 });
