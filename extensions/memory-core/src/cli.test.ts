@@ -108,13 +108,23 @@ afterAll(async () => {
 describe("memory cli", () => {
   const inactiveMemorySecretDiagnostic = "agents.defaults.memorySearch.remote.apiKey inactive"; // pragma: allowlist secret
 
+  function firstMockCallArg(mock: { mock: { calls: unknown[][] } }, label: string): unknown {
+    const call = mock.mock.calls[0];
+    if (!call) {
+      throw new Error(`expected ${label} call`);
+    }
+    return call[0];
+  }
+
   function expectCliSync(sync: ReturnType<typeof vi.fn>) {
-    const syncCall = sync.mock.calls[0]?.[0] as
-      | { reason?: unknown; force?: unknown; progress?: unknown }
-      | undefined;
-    expect(syncCall?.reason).toBe("cli");
-    expect(syncCall?.force).toBe(false);
-    expect(typeof syncCall?.progress).toBe("function");
+    const syncCall = firstMockCallArg(sync, "sync") as {
+      reason?: unknown;
+      force?: unknown;
+      progress?: unknown;
+    };
+    expect(syncCall.reason).toBe("cli");
+    expect(syncCall.force).toBe(false);
+    expect(typeof syncCall.progress).toBe("function");
   }
 
   function makeMemoryStatus(overrides: Record<string, unknown> = {}) {
@@ -261,9 +271,7 @@ describe("memory cli", () => {
 
     params.beforeExpect?.();
     expect(close).toHaveBeenCalled();
-    expect(error).toHaveBeenCalledWith(
-      expect.stringContaining("Memory manager close failed: close boom"),
-    );
+    expect(error).toHaveBeenCalledWith("Memory manager close failed: close boom");
     expect(process.exitCode).toBeUndefined();
   }
 
@@ -355,12 +363,13 @@ describe("memory cli", () => {
 
     await runMemoryCli(["status"]);
 
-    const secretRefsCall = resolveCommandSecretRefsViaGateway.mock.calls[0]?.[0] as
-      | { config?: unknown; commandName?: unknown; targetIds?: unknown }
-      | undefined;
-    expect(secretRefsCall?.config).toBe(config);
-    expect(secretRefsCall?.commandName).toBe("memory status");
-    expect(secretRefsCall?.targetIds).toStrictEqual(
+    const secretRefsCall = firstMockCallArg(
+      resolveCommandSecretRefsViaGateway,
+      "resolve command secret refs",
+    ) as { config?: unknown; commandName?: unknown; targetIds?: unknown };
+    expect(secretRefsCall.config).toBe(config);
+    expect(secretRefsCall.commandName).toBe("memory status");
+    expect(secretRefsCall.targetIds).toStrictEqual(
       new Set([
         "agents.defaults.memorySearch.remote.apiKey",
         "agents.list[].memorySearch.remote.apiKey",
@@ -839,7 +848,7 @@ describe("memory cli", () => {
 
       expectCliSync(sync);
       expect(error).toHaveBeenCalledWith(
-        expect.stringContaining("Memory index failed (main): QMD index file is empty"),
+        `Memory index failed (main): QMD index file is empty: ${dbPath}`,
       );
       expect(close).toHaveBeenCalled();
       expect(process.exitCode).toBe(1);
@@ -1808,7 +1817,6 @@ describe("memory cli", () => {
       const entries = Object.values(store.entries ?? {});
       expect(entries).toHaveLength(1);
       const entry = entries[0];
-      expect(entry).toBeDefined();
       if (!entry) {
         throw new Error("Expected short-term recall entry");
       }

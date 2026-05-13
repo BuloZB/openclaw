@@ -138,6 +138,7 @@ type SummaryCase = {
     critical?: number;
     warn?: number;
     info?: number;
+    truncated?: boolean;
     findingCount?: number;
     maxFindings?: number;
     expectedRuleId?: string;
@@ -529,7 +530,21 @@ describe("scanDirectoryWithSummary", () => {
       options: { maxFiles: 2 },
       expected: {
         scannedFiles: 2,
+        truncated: true,
         maxFindings: 2,
+      },
+    },
+    {
+      name: "does not mark scans truncated when file count exactly matches maxFiles",
+      files: {
+        "a.js": `const x = eval("a");`,
+        "b.js": `const x = eval("b");`,
+      },
+      options: { maxFiles: 2 },
+      expected: {
+        scannedFiles: 2,
+        truncated: false,
+        findingCount: 2,
       },
     },
     {
@@ -591,6 +606,9 @@ describe("scanDirectoryWithSummary", () => {
         if (testCase.expected.info != null) {
           expect(summary.info).toBe(testCase.expected.info);
         }
+        if (testCase.expected.truncated != null) {
+          expect(summary.truncated).toBe(testCase.expected.truncated);
+        }
         if (testCase.expected.findingCount != null) {
           expect(summary.findings).toHaveLength(testCase.expected.findingCount);
         }
@@ -626,7 +644,13 @@ describe("scanDirectoryWithSummary", () => {
     });
 
     try {
-      await expect(scanDirectoryWithSummary(root)).rejects.toMatchObject({ code: "EACCES" });
+      let thrown: unknown;
+      try {
+        await scanDirectoryWithSummary(root);
+      } catch (error) {
+        thrown = error;
+      }
+      expect((thrown as NodeJS.ErrnoException | undefined)?.code).toBe("EACCES");
     } finally {
       spy.mockRestore();
     }
@@ -660,7 +684,13 @@ describe("scanDirectoryWithSummary", () => {
     const spy = mockStatPermissionDeniedFor(filePath);
 
     try {
-      await expect(scanDirectory(root)).rejects.toMatchObject({ code: "EACCES" });
+      let thrown: unknown;
+      try {
+        await scanDirectory(root);
+      } catch (error) {
+        thrown = error;
+      }
+      expect((thrown as NodeJS.ErrnoException | undefined)?.code).toBe("EACCES");
     } finally {
       spy.mockRestore();
     }

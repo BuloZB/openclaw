@@ -21,7 +21,16 @@ import {
 } from "./clawhub.js";
 
 async function expectPathMissing(targetPath: string): Promise<void> {
-  await expect(fs.stat(targetPath)).rejects.toMatchObject({ code: "ENOENT" });
+  let statError: unknown;
+  try {
+    await fs.stat(targetPath);
+  } catch (error) {
+    statError = error;
+  }
+  if (statError === undefined) {
+    throw new Error(`Expected ${targetPath} to be missing`);
+  }
+  expect((statError as { code?: unknown }).code).toBe("ENOENT");
 }
 
 describe("clawhub helpers", () => {
@@ -321,28 +330,73 @@ describe("clawhub helpers", () => {
           requestedUrl = input instanceof Request ? input.url : String(input);
           return new Response(
             JSON.stringify({
-              releaseId: "rel_demo",
-              state: "approved",
-              reasonCode: "clean",
-              createdAt: 1774256733107,
-              scanState: "clean",
-              moderationState: "approved",
+              package: {
+                name: "@openclaw/diagnostics-otel",
+                displayName: "Diagnostics",
+                family: "code-plugin",
+              },
+              release: {
+                id: "rel_demo",
+                version: "2026.3.22",
+              },
+              trust: {
+                scanStatus: "clean",
+                moderationState: null,
+                blockedFromDownload: false,
+                reasons: [],
+                pending: false,
+                stale: true,
+              },
             }),
             { status: 200, headers: { "content-type": "application/json" } },
           );
         },
       }),
     ).resolves.toEqual({
-      releaseId: "rel_demo",
-      state: "approved",
-      reasonCode: "clean",
-      createdAt: 1774256733107,
-      scanState: "clean",
-      moderationState: "approved",
+      package: {
+        name: "@openclaw/diagnostics-otel",
+        displayName: "Diagnostics",
+        family: "code-plugin",
+      },
+      release: {
+        id: "rel_demo",
+        version: "2026.3.22",
+      },
+      trust: {
+        scanStatus: "clean",
+        moderationState: null,
+        blockedFromDownload: false,
+        reasons: [],
+        pending: false,
+        stale: true,
+      },
     });
     expect(new URL(requestedUrl).pathname).toBe(
       "/api/v1/packages/%40openclaw%2Fdiagnostics-otel/versions/2026.3.22/security",
     );
+  });
+
+  it("rejects malformed package security reports", async () => {
+    await expect(
+      fetchClawHubPackageSecurity({
+        name: "@openclaw/diagnostics-otel",
+        version: "2026.3.22",
+        fetchImpl: async () =>
+          new Response(
+            JSON.stringify({
+              trust: {
+                scanStatus: "clean",
+                moderationState: null,
+                blockedFromDownload: false,
+                reasons: "clean",
+                pending: false,
+                stale: false,
+              },
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          ),
+      }),
+    ).rejects.toThrow("expected reasons to be a string array");
   });
 
   it("downloads package archives to sanitized temp paths and cleans them up", async () => {
