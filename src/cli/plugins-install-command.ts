@@ -33,7 +33,6 @@ import { validateJsonSchemaValue } from "../plugins/schema-validator.js";
 import { defaultRuntime, type RuntimeEnv } from "../runtime.js";
 import { theme } from "../terminal/theme.js";
 import { shortenHomePath } from "../utils.js";
-import { resolveClawHubRiskAcknowledgementCliOptions } from "./clawhub-risk-acknowledgement.js";
 import { formatCliCommand } from "./command-format.js";
 import { looksLikeLocalInstallSpec } from "./install-spec.js";
 import { resolvePinnedNpmInstallRecordForCli } from "./npm-resolution.js";
@@ -492,7 +491,13 @@ function isAllowedPluginRecoveryIssue(
       issue.message.includes("plugin path not found")) ||
     (issue.path === "plugins" &&
       typeof issue.message === "string" &&
-      issue.message.includes("requires compiled runtime output"))
+      issue.message.includes("requires compiled runtime output")) ||
+    (issue.path === `plugins.entries.${pluginId}` &&
+      typeof issue.message === "string" &&
+      issue.message.includes("requires compiled runtime output")) ||
+    (issue.path === "tools.web.search.provider" &&
+      typeof issue.message === "string" &&
+      issue.message.includes(`plugin "${pluginId}"`))
   );
 }
 
@@ -559,7 +564,6 @@ export async function loadConfigForInstall(
 export async function runPluginInstallCommand(params: {
   raw: string;
   opts: InstallSafetyOverrides & {
-    acknowledgeClawHubRisk?: boolean;
     force?: boolean;
     link?: boolean;
     pin?: boolean;
@@ -943,10 +947,6 @@ export async function runPluginInstallCommand(params: {
   if (clawhubSpec) {
     const result = await installPluginFromClawHub({
       ...safetyOverrides,
-      ...resolveClawHubRiskAcknowledgementCliOptions({
-        acknowledgeClawHubRisk: opts.acknowledgeClawHubRisk,
-        action: "installing",
-      }),
       mode: installMode,
       spec: raw,
       extensionsDir,
