@@ -4,7 +4,11 @@ import { URL } from "node:url";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { createEditTool, createReadTool, createWriteTool } from "@earendil-works/pi-coding-agent";
 import { isWindowsDrivePath } from "../infra/archive-path.js";
-import { root as fsRoot, FsSafeError } from "../infra/fs-safe.js";
+import {
+  canonicalPathFromExistingAncestor,
+  root as fsRoot,
+  FsSafeError,
+} from "../infra/fs-safe.js";
 import { expandHomePrefix, resolveOsHomeDir } from "../infra/home-dir.js";
 import { hasEncodedFileUrlSeparator, trySafeFileURLToPath } from "../infra/local-file-access.js";
 import { detectMime } from "../media/mime.js";
@@ -624,10 +628,47 @@ export function wrapToolMemoryFlushAppendOnlyWrite(
   };
 }
 
+function isSandboxRootEscapeError(error: unknown): boolean {
+  return error instanceof Error && /^Path escapes sandbox root \(/i.test(error.message);
+}
+
+async function assertSandboxPathWithinAnyRoot(params: {
+  filePath: string;
+  roots: readonly string[];
+}) {
+  let firstRootEscapeError: unknown;
+  const seen = new Set<string>();
+  for (const candidateRoot of params.roots) {
+    const trimmedRoot = candidateRoot.trim();
+    if (!trimmedRoot) {
+      continue;
+    }
+    const root = path.resolve(trimmedRoot);
+    if (seen.has(root)) {
+      continue;
+    }
+    seen.add(root);
+    try {
+      return await assertSandboxPath({
+        filePath: params.filePath,
+        cwd: root,
+        root,
+      });
+    } catch (error) {
+      if (!isSandboxRootEscapeError(error)) {
+        throw error;
+      }
+      firstRootEscapeError ??= error;
+    }
+  }
+  throw firstRootEscapeError ?? new Error("Path guard has no configured roots.");
+}
+
 export function wrapToolWorkspaceRootGuardWithOptions(
   tool: AnyAgentTool,
   root: string,
   options?: {
+    additionalRoots?: readonly string[];
     additionalContainerMounts?: readonly {
       containerRoot: string;
       hostRoot: string;
@@ -670,10 +711,11 @@ export function wrapToolWorkspaceRootGuardWithOptions(
             }
           }
         }
-        const sandboxResult = await assertSandboxPath({
+        const additionalRoots =
+          guardedRoot === root && !workspaceMapping.matched ? (options?.additionalRoots ?? []) : [];
+        const sandboxResult = await assertSandboxPathWithinAnyRoot({
           filePath: sandboxPath,
-          cwd: guardedRoot,
-          root: guardedRoot,
+          roots: [guardedRoot, ...additionalRoots],
         });
         if (options?.normalizeGuardedPathParams && record) {
           normalizedRecord ??= { ...record };
@@ -846,7 +888,7 @@ function createHostWriteOperations(root: string, options?: { workspaceOnly?: boo
       await fs.mkdir(resolved, { recursive: true });
     },
     writeFile: async (absolutePath: string, content: string) => {
-      const relative = toRelativeWorkspacePath(root, absolutePath);
+      const relative = await toCanonicalRelativeWorkspacePath(root, absolutePath);
       await (await rootPromise).write(relative, content, { mkdir: true });
     },
   } as const;
@@ -879,7 +921,7 @@ function createHostEditOperations(root: string, options?: { workspaceOnly?: bool
       return safeRead.buffer;
     },
     writeFile: async (absolutePath: string, content: string) => {
-      const relative = toRelativeWorkspacePath(root, absolutePath);
+      const relative = await toCanonicalRelativeWorkspacePath(root, absolutePath);
       await (await rootPromise).write(relative, content, { mkdir: true });
     },
     access: async (absolutePath: string) => {
@@ -910,6 +952,21 @@ function createHostEditOperations(root: string, options?: { workspaceOnly?: bool
       }
     },
   } as const;
+}
+
+async function toCanonicalRelativeWorkspacePath(
+  root: string,
+  absolutePath: string,
+): Promise<string> {
+  const lexicalRelative = toRelativeWorkspacePath(root, absolutePath);
+  const lexicalPath = path.resolve(root, lexicalRelative);
+  const parentPath = path.dirname(lexicalPath);
+  const [rootReal, canonicalParentPath] = await Promise.all([
+    fs.realpath(root),
+    canonicalPathFromExistingAncestor(parentPath),
+  ]);
+  const canonicalPath = path.join(canonicalParentPath, path.basename(lexicalPath));
+  return toRelativeWorkspacePath(rootReal, canonicalPath);
 }
 
 function createFsAccessError(code: string, filePath: string): NodeJS.ErrnoException {

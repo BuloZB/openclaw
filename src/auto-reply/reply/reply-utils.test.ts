@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { getReplyPayloadMetadata, setReplyPayloadMetadata } from "../reply-payload.js";
 import { SILENT_REPLY_TOKEN } from "../tokens.js";
 import { parseAudioTag } from "./audio-tags.js";
 import { createBlockReplyCoalescer } from "./block-reply-coalescer.js";
@@ -88,10 +89,50 @@ describe("matchesMentionWithExplicit", () => {
       expect(result, testCase.name).toBe(testCase.expected);
     }
   });
+
+  it("lets catch-all regexes activate empty text without matching specific patterns", () => {
+    expect(
+      matchesMentionWithExplicit({
+        text: "",
+        mentionRegexes: [/.*/i],
+      }),
+    ).toBe(true);
+    expect(
+      matchesMentionWithExplicit({
+        text: "",
+        mentionRegexes,
+      }),
+    ).toBe(false);
+  });
 });
 
 // Keep channelData-only payloads so channel-specific replies survive normalization.
 describe("normalizeReplyPayload", () => {
+  it("preserves reply payload metadata across normalization clones", () => {
+    const payload = setReplyPayloadMetadata(
+      {
+        text: " Visible reply ",
+      },
+      {
+        sourceReplyTranscriptMirror: {
+          sessionKey: "main",
+          text: " Visible reply ",
+          idempotencyKey: "run-1:source-reply",
+        },
+      },
+    );
+
+    const normalized = normalizeReplyPayload(payload);
+
+    const reply = expectNormalizedReply(normalized);
+    expect(reply).not.toBe(payload);
+    expect(getReplyPayloadMetadata(reply)?.sourceReplyTranscriptMirror).toEqual({
+      sessionKey: "main",
+      text: " Visible reply ",
+      idempotencyKey: "run-1:source-reply",
+    });
+  });
+
   it("keeps channelData-only replies", () => {
     const payload = {
       channelData: {

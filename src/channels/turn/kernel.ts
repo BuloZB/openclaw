@@ -3,6 +3,7 @@ import {
   clearHistoryEntriesIfEnabled,
   recordPendingHistoryEntryWithMedia,
 } from "../../auto-reply/reply/history.js";
+import { toHistoryMediaEntries } from "../inbound-event/media.js";
 import { createChannelReplyPipeline } from "../message/reply-pipeline.js";
 import type { CreateChannelReplyPipelineParams } from "../message/reply-pipeline.js";
 import { recordChannelBotPairLoopAndCheckSuppression } from "./bot-loop-protection.js";
@@ -12,9 +13,11 @@ import {
   isDurableInboundReplyDeliveryHandled,
   throwIfDurableInboundReplyDeliveryFailed,
 } from "./durable-delivery.js";
-import { toHistoryMediaEntries } from "./media.js";
-export { buildChannelTurnContext, filterChannelTurnSupplementalContext } from "./context.js";
-export type { BuildChannelTurnContextParams } from "./context.js";
+export {
+  buildChannelInboundEventContext,
+  filterChannelInboundSupplementalContext,
+} from "../inbound-event/context.js";
+export type { BuildChannelInboundEventContextParams } from "../inbound-event/context.js";
 export {
   clearChannelBotPairLoopGuardForTests,
   listTrackedChannelBotPairsForTests,
@@ -38,7 +41,7 @@ import type {
   AssembledChannelTurn,
   ChannelEventClass,
   ChannelTurnAdmission,
-  ChannelTurnDeliveryAdapter,
+  ChannelEventDeliveryAdapter,
   ChannelTurnHistoryFinalizeOptions,
   ChannelTurnLogEvent,
   ChannelTurnResolved,
@@ -67,7 +70,7 @@ export type {
   ChannelEventClass,
   ChannelTurnAdapter,
   ChannelTurnAdmission,
-  ChannelTurnDeliveryAdapter,
+  ChannelEventDeliveryAdapter,
   ChannelTurnDroppedHistoryOptions,
   ChannelTurnHistoryFinalizeOptions,
   ChannelTurnDispatcherOptions,
@@ -141,7 +144,7 @@ function emit(params: {
   });
 }
 
-export function createNoopChannelTurnDeliveryAdapter(): ChannelTurnDeliveryAdapter {
+export function createNoopChannelEventDeliveryAdapter(): ChannelEventDeliveryAdapter {
   return {
     deliver: async () => ({
       visibleReplySent: false,
@@ -260,6 +263,47 @@ function resolveObserveOnlyDispatchResult<TDispatchResult>(
   }) as TDispatchResult;
 }
 
+function isExplicitlyNonVisibleChannelDelivery(result: unknown): boolean {
+  return (
+    typeof result === "object" &&
+    result !== null &&
+    !Array.isArray(result) &&
+    (result as { visibleReplySent?: unknown }).visibleReplySent === false
+  );
+}
+
+function markChannelDeliveryErrorVisible(error: unknown): unknown {
+  if (typeof error === "object" && error !== null && !Array.isArray(error)) {
+    try {
+      Object.assign(error, { sentBeforeError: true, visibleReplySent: true });
+      return error;
+    } catch {
+      // Fall back to a wrapper when a platform error object is non-extensible.
+    }
+  }
+  const visibleError = new Error("visible channel reply delivery failed", { cause: error });
+  Object.assign(visibleError, { sentBeforeError: true, visibleReplySent: true });
+  return visibleError;
+}
+
+async function runChannelDeliveryObserver(params: {
+  onDelivered: ChannelEventDeliveryAdapter["onDelivered"] | undefined;
+  payload: ReplyPayload;
+  info: Parameters<NonNullable<ChannelEventDeliveryAdapter["onDelivered"]>>[1];
+  result: Parameters<NonNullable<ChannelEventDeliveryAdapter["onDelivered"]>>[2];
+}): Promise<void> {
+  if (!params.onDelivered) {
+    return;
+  }
+  try {
+    await params.onDelivered(params.payload, params.info, params.result);
+  } catch (error: unknown) {
+    throw isExplicitlyNonVisibleChannelDelivery(params.result)
+      ? error
+      : markChannelDeliveryErrorVisible(error);
+  }
+}
+
 function resolveBotLoopProtectionDrop<TDispatchResult>(
   params: PreparedChannelTurn<TDispatchResult>,
 ): ChannelTurnResult<TDispatchResult> | undefined {
@@ -355,12 +399,22 @@ export async function dispatchAssembledChannelTurn(
                 });
                 throwIfDurableInboundReplyDeliveryFailed(durable);
                 if (isDurableInboundReplyDeliveryHandled(durable)) {
-                  await params.delivery.onDelivered?.(preparedPayload, info, durable.delivery);
+                  await runChannelDeliveryObserver({
+                    onDelivered: params.delivery.onDelivered,
+                    payload: preparedPayload,
+                    info,
+                    result: durable.delivery,
+                  });
                   return durable.delivery;
                 }
               }
               const result = await params.delivery.deliver(preparedPayload, info);
-              await params.delivery.onDelivered?.(preparedPayload, info, result);
+              await runChannelDeliveryObserver({
+                onDelivered: params.delivery.onDelivered,
+                payload: preparedPayload,
+                info,
+                result,
+              });
               return result;
             },
             onError: params.delivery.onError,
@@ -632,7 +686,7 @@ export async function runChannelTurn<
       admission.kind === "observeOnly"
         ? {
             ...resolved,
-            delivery: createNoopChannelTurnDeliveryAdapter(),
+            delivery: createNoopChannelEventDeliveryAdapter(),
             admission,
             log: params.log,
             messageId: input.id,
