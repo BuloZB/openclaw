@@ -1,3 +1,5 @@
+// Effective tools methods resolve the tools available to a session by combining
+// bundled tools, MCP tools, plugin policy, model context, and cache state.
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import {
   ErrorCodes,
@@ -5,6 +7,7 @@ import {
   formatValidationErrors,
   validateToolsEffectiveParams,
 } from "../../../packages/gateway-protocol/src/index.js";
+import { resolveConversationCapabilityProfile } from "../../agents/conversation-capability-profile.js";
 import { buildEffectiveToolInventoryGroups } from "../../agents/tools-effective-inventory-groups.js";
 import type {
   EffectiveToolInventoryNotice,
@@ -15,6 +18,7 @@ import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { toErrorObject } from "../../infra/errors.js";
 import { logDebug, logWarn } from "../../logger.js";
 import { stringifyRouteThreadId } from "../../plugin-sdk/channel-route.js";
+import { getConnectedNodePluginToolsVersion } from "../node-plugin-tool-snapshot.js";
 import {
   applyFinalEffectiveToolPolicy,
   buildBundleMcpToolsFromCatalog,
@@ -53,6 +57,7 @@ type TrustedToolsEffectiveContext = {
   runtimeConfigCacheKey: string;
   pluginRegistryVersion: number;
   channelRegistryVersion: number;
+  nodePluginToolsVersion: number;
   modelProvider?: string;
   modelId?: string;
   messageProvider?: string;
@@ -91,6 +96,7 @@ function buildToolsEffectiveCacheKey(params: {
     config: context.runtimeConfigCacheKey,
     pluginRegistry: context.pluginRegistryVersion,
     channelRegistry: context.channelRegistryVersion,
+    nodePluginTools: context.nodePluginToolsVersion,
     // MCP fingerprint/server names intentionally stay out of this key: the MCP
     // layer is applied after the base cache, so warm/stale runtime state alone
     // never invalidates base entries.
@@ -375,16 +381,19 @@ function filterMcpTools(params: {
   return applyFinalEffectiveToolPolicy({
     bundledTools: params.mcpTools,
     config: params.context.cfg,
-    sessionKey: params.context.sessionKey,
-    agentId: params.context.agentId,
-    modelProvider: params.context.modelProvider,
-    modelId: params.context.modelId,
-    messageProvider: params.context.messageProvider,
-    agentAccountId: params.context.accountId,
-    groupId: params.context.groupId,
-    groupChannel: params.context.groupChannel,
-    groupSpace: params.context.groupSpace,
-    spawnedBy: params.context.spawnedBy,
+    conversationCapabilityProfile: resolveConversationCapabilityProfile({
+      config: params.context.cfg,
+      sessionKey: params.context.sessionKey,
+      agentId: params.context.agentId,
+      modelProvider: params.context.modelProvider,
+      modelId: params.context.modelId,
+      messageProvider: params.context.messageProvider,
+      agentAccountId: params.context.accountId,
+      groupId: params.context.groupId,
+      groupChannel: params.context.groupChannel,
+      groupSpace: params.context.groupSpace,
+      spawnedBy: params.context.spawnedBy,
+    }),
     warn: logWarn,
   });
 }
@@ -457,7 +466,10 @@ function resolveTrustedToolsEffectiveContext(params: {
 }) {
   // The effective tools request is read-only but security-sensitive. Derive
   // routing/account/model context from the persisted session, not client params.
-  const loaded = loadSessionEntry(params.sessionKey);
+  const loaded = loadSessionEntry(
+    params.sessionKey,
+    params.requestedAgentId ? { agentId: params.requestedAgentId } : undefined,
+  );
   if (!loaded.entry) {
     params.respond(
       false,
@@ -467,9 +479,18 @@ function resolveTrustedToolsEffectiveContext(params: {
     return null;
   }
 
+  // Only a canonical `global` key may adopt the client-requested agent: global
+  // stores are shared, so the requested agent selects which agent's global store
+  // to read. Non-global keys encode their owning agent, so the requested agent
+  // must stay subject to the mismatch guard below instead of overriding session
+  // ownership — otherwise `{ sessionKey: "agent:main:x", agentId: "work" }` would
+  // resolve under `work` and silently bypass the guard.
+  const canonicalKey = loaded.canonicalKey ?? params.sessionKey;
+  const allowRequestedAgentOverride = canonicalKey === "global" && Boolean(params.requestedAgentId);
   const sessionAgentId = resolveSessionAgentId({
-    sessionKey: loaded.canonicalKey ?? params.sessionKey,
+    sessionKey: canonicalKey,
     config: loaded.cfg,
+    ...(allowRequestedAgentOverride ? { agentId: params.requestedAgentId } : {}),
   });
   if (params.requestedAgentId && params.requestedAgentId !== sessionAgentId) {
     params.respond(
@@ -491,6 +512,7 @@ function resolveTrustedToolsEffectiveContext(params: {
   const runtimeConfigCacheKey = resolveRuntimeConfigCacheKey(loaded.cfg);
   const pluginRegistryVersion = getActivePluginRegistryVersion();
   const channelRegistryVersion = getActivePluginChannelRegistryVersion();
+  const nodePluginToolsVersion = getConnectedNodePluginToolsVersion();
   return {
     cfg: loaded.cfg,
     agentId: sessionAgentId,
@@ -500,6 +522,7 @@ function resolveTrustedToolsEffectiveContext(params: {
     runtimeConfigCacheKey,
     pluginRegistryVersion,
     channelRegistryVersion,
+    nodePluginToolsVersion,
     modelProvider: resolvedModel.provider,
     modelId: resolvedModel.model,
     messageProvider:

@@ -1,3 +1,4 @@
+// Discord tests cover native command.think autocomplete plugin behavior.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -6,7 +7,10 @@ import {
   createEmptyPluginRegistry,
   setActivePluginRegistry,
 } from "openclaw/plugin-sdk/plugin-test-runtime";
-import { clearSessionStoreCacheForTest } from "openclaw/plugin-sdk/session-store-runtime";
+import {
+  clearSessionStoreCacheForTest,
+  upsertSessionEntry,
+} from "openclaw/plugin-sdk/session-store-runtime";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { ChannelType, type AutocompleteInteraction } from "../internal/discord.js";
 import { createNoopThreadBindingManager } from "./thread-bindings.js";
@@ -95,7 +99,11 @@ vi.mock("openclaw/plugin-sdk/conversation-binding-runtime", async () => {
 });
 
 vi.mock("openclaw/plugin-sdk/agent-runtime", () => ({
+  getPreparedModelCatalogSnapshot: vi.fn(() => ({ entries: [], routeVariants: [] })),
+  loadPreparedModelCatalog: vi.fn(async () => []),
   normalizeProviderId: (value: string) => value.trim().toLowerCase(),
+  resolveAgentDir: (_cfg: OpenClawConfig, agentId: string) => `/tmp/agents/${agentId}/agent`,
+  resolveAgentWorkspaceDir: (_cfg: OpenClawConfig, agentId: string) => `/tmp/workspaces/${agentId}`,
   resolveDefaultModelForAgent: (params: { cfg: OpenClawConfig }) => {
     const configuredModel = params.cfg.agents?.defaults?.model;
     const primary =
@@ -128,6 +136,25 @@ const SESSION_KEY = "agent:main:main";
 let findCommandByNativeName: typeof import("openclaw/plugin-sdk/command-auth-native").findCommandByNativeName;
 let resolveCommandArgChoices: typeof import("openclaw/plugin-sdk/command-auth-native").resolveCommandArgChoices;
 let resolveDiscordNativeChoiceContext: typeof import("./native-command-model-picker-ui.js").resolveDiscordNativeChoiceContext;
+
+async function saveSessionOverride(params: {
+  providerOverride: string;
+  modelOverride: string;
+  agentRuntimeOverride?: string;
+}): Promise<void> {
+  fs.mkdirSync(path.dirname(STORE_PATH), { recursive: true });
+  await upsertSessionEntry({
+    storePath: STORE_PATH,
+    sessionKey: SESSION_KEY,
+    entry: {
+      sessionId: "main",
+      updatedAt: Date.now(),
+      providerOverride: params.providerOverride,
+      modelOverride: params.modelOverride,
+      ...(params.agentRuntimeOverride ? { agentRuntimeOverride: params.agentRuntimeOverride } : {}),
+    },
+  });
+}
 
 function installProviderThinkingRegistryForTest(): void {
   const registry = createEmptyPluginRegistry();
@@ -196,9 +223,13 @@ describe("discord native /think autocomplete", () => {
     });
     ({ findCommandByNativeName, resolveCommandArgChoices, resolveDiscordNativeChoiceContext } =
       await loadDiscordThinkAutocompleteModulesForTest());
+
+    // Compile the provider-backed default choice context outside per-case timing.
+    const { command, levelArg } = requireThinkLevelCommand();
+    resolveCommandArgChoices({ command, arg: levelArg, cfg: createConfig(), catalog: [] });
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     clearSessionStoreCacheForTest();
     ensureConfiguredBindingRouteReadyMock.mockReset();
     ensureConfiguredBindingRouteReadyMock.mockResolvedValue({ ok: true });
@@ -217,18 +248,10 @@ describe("discord native /think autocomplete", () => {
         : undefined,
     );
     installProviderThinkingRegistryForTest();
-    fs.mkdirSync(path.dirname(STORE_PATH), { recursive: true });
-    fs.writeFileSync(
-      STORE_PATH,
-      JSON.stringify({
-        [SESSION_KEY]: {
-          updatedAt: Date.now(),
-          providerOverride: "openai",
-          modelOverride: "gpt-5.4",
-        },
-      }),
-      "utf8",
-    );
+    await saveSessionOverride({
+      providerOverride: "openai",
+      modelOverride: "gpt-5.4",
+    });
   });
 
   afterEach(() => {
@@ -294,6 +317,8 @@ describe("discord native /think autocomplete", () => {
     expect(context).toEqual({
       provider: "openai",
       model: "gpt-5.4",
+      agentId: "main",
+      agentRuntime: "codex",
     });
 
     const choices = resolveCommandArgChoices({
@@ -302,6 +327,7 @@ describe("discord native /think autocomplete", () => {
       cfg,
       provider: context?.provider,
       model: context?.model,
+      agentRuntime: context?.agentRuntime,
       catalog: [],
     });
     const values = choices.map((choice) => choice.value);
@@ -310,6 +336,67 @@ describe("discord native /think autocomplete", () => {
     expect(values).not.toContain("adaptive");
   });
 
+  it.each([
+    { sessionRuntime: undefined, expectedRuntime: "codex", supportsUltra: false },
+    { sessionRuntime: "openclaw", expectedRuntime: "openclaw", supportsUltra: true },
+  ])(
+    "uses the effective $expectedRuntime runtime for Luna choices",
+    async ({ sessionRuntime, expectedRuntime, supportsUltra }) => {
+      providerThinkingMocks.resolveProviderThinkingProfile.mockImplementation(
+        ({ provider, context }) =>
+          provider === "openai" && context.modelId === "gpt-5.6-luna"
+            ? {
+                levels: [
+                  { id: "off" },
+                  { id: "max" },
+                  ...(context.agentRuntime === "openclaw" ? [{ id: "ultra" as const }] : []),
+                ],
+              }
+            : undefined,
+      );
+      await saveSessionOverride({
+        providerOverride: "openai",
+        modelOverride: "gpt-5.6-luna",
+        ...(sessionRuntime ? { agentRuntimeOverride: sessionRuntime } : {}),
+      });
+      const cfg = createConfig();
+      const interaction = {
+        options: { getFocused: () => ({ value: "" }) },
+        respond: async (_choices: Array<{ name: string; value: string }>) => {},
+        rawData: {},
+        channel: { id: "D1", type: ChannelType.DM },
+        user: { id: "U1" },
+        guild: undefined,
+        client: { fetchChannel: async () => ({ id: "D1", type: ChannelType.DM }) },
+      } as unknown as AutocompleteInteraction;
+
+      const context = await resolveDiscordNativeChoiceContext({
+        interaction,
+        cfg,
+        accountId: "default",
+        threadBindings: createNoopThreadBindingManager("default"),
+      });
+      expect(context).toEqual({
+        provider: "openai",
+        model: "gpt-5.6-luna",
+        agentId: "main",
+        agentRuntime: expectedRuntime,
+      });
+
+      const { command, levelArg } = requireThinkLevelCommand();
+      const choices = resolveCommandArgChoices({
+        command,
+        arg: levelArg,
+        cfg,
+        provider: context?.provider,
+        model: context?.model,
+        agentRuntime: context?.agentRuntime,
+        catalog: [],
+      });
+      expect(choices.some((choice) => choice.value === "ultra")).toBe(supportsUltra);
+    },
+  );
+
   it("includes max only for provider-advertised models", async () => {
     providerThinkingMocks.resolveProviderThinkingProfile.mockImplementation(
       ({ provider, context }) =>
@@ -317,17 +404,10 @@ describe("discord native /think autocomplete", () => {
           ? { levels: [{ id: "off" }, { id: "max" }] }
           : undefined,
     );
-    fs.writeFileSync(
-      STORE_PATH,
-      JSON.stringify({
-        [SESSION_KEY]: {
-          updatedAt: Date.now(),
-          providerOverride: "anthropic",
-          modelOverride: "claude-opus-4-7",
-        },
-      }),
-      "utf8",
-    );
+    await saveSessionOverride({
+      providerOverride: "anthropic",
+      modelOverride: "claude-opus-4-7",
+    });
     const cfg = createConfig();
     resolveConfiguredBindingRouteMock.mockImplementation(createConfiguredRouteResult);
     const interaction = {
@@ -360,6 +440,7 @@ describe("discord native /think autocomplete", () => {
       cfg,
       provider: context?.provider,
       model: context?.model,
+      agentRuntime: context?.agentRuntime,
       catalog: [],
     });
     const values = choices.map((choice) => choice.value);

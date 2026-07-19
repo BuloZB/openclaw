@@ -1,3 +1,5 @@
+// Workspace run tests cover runtime workspace resolution from explicit input,
+// agent config, session keys, and environment fallback.
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import type { OpenClawConfig } from "../config/config.js";
@@ -12,8 +14,25 @@ describe("resolveRunWorkspaceDir", () => {
     });
 
     expect(result.usedFallback).toBe(false);
+    expect(result.isCanonicalWorkspace).toBe(false);
     expect(result.agentId).toBe("main");
     expect(result.workspaceDir).toBe(path.resolve(explicit));
+  });
+
+  it("recognizes an explicitly supplied configured workspace as canonical", () => {
+    const workspaceDir = path.join(process.cwd(), "tmp", "workspace-run-canonical");
+    const cfg = {
+      agents: { defaults: { workspace: workspaceDir } },
+    } satisfies OpenClawConfig;
+
+    const result = resolveRunWorkspaceDir({
+      workspaceDir,
+      sessionKey: "agent:main:subagent:test",
+      config: cfg,
+    });
+
+    expect(result.usedFallback).toBe(false);
+    expect(result.isCanonicalWorkspace).toBe(true);
   });
 
   it("falls back to configured per-agent workspace when input is missing", () => {
@@ -33,6 +52,7 @@ describe("resolveRunWorkspaceDir", () => {
     });
 
     expect(result.usedFallback).toBe(true);
+    expect(result.isCanonicalWorkspace).toBe(true);
     expect(result.fallbackReason).toBe("missing");
     expect(result.agentId).toBe("research");
     expect(result.workspaceDir).toBe(path.resolve(researchWorkspace));
@@ -104,6 +124,8 @@ describe("resolveRunWorkspaceDir", () => {
   });
 
   it("throws for malformed agent session keys even when config has a default agent", () => {
+    // Malformed agent-prefixed keys are configuration/data errors; default
+    // agents should not mask them as legacy main-session keys.
     const mainWorkspace = path.join(process.cwd(), "tmp", "workspace-main-default");
     const researchWorkspace = path.join(process.cwd(), "tmp", "workspace-research-default");
     const cfg = {

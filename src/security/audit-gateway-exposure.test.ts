@@ -1,3 +1,4 @@
+// Covers gateway exposure audit classification.
 import { describe, expect, it } from "vitest";
 import type { OpenClawConfig } from "../config/config.js";
 import { collectGatewayConfigFindings } from "./audit-gateway-config.js";
@@ -37,6 +38,15 @@ function requireFinding(
 }
 
 describe("security audit gateway exposure findings", () => {
+  it("warns when the MCP Apps bridge is enabled", () => {
+    const cfg: OpenClawConfig = { mcp: { apps: { enabled: true } } };
+    expect(collectGatewayConfigFindings(cfg, cfg, {})).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ checkId: "mcp.apps.enabled", severity: "warn" }),
+      ]),
+    );
+  });
+
   it("warns on insecure or dangerous flags", () => {
     const cases = [
       {
@@ -444,6 +454,25 @@ describe("security audit gateway exposure findings", () => {
           },
         },
         expectedCheckId: "gateway.trusted_proxy_allow_loopback",
+        expectedSeverity: "warn",
+      },
+      {
+        name: "browser device auto-approval enabled",
+        cfg: {
+          gateway: {
+            bind: "lan",
+            trustedProxies: ["10.0.0.1"],
+            auth: {
+              mode: "trusted-proxy",
+              trustedProxy: {
+                userHeader: "x-forwarded-user",
+                allowUsers: ["nick@example.com"],
+                deviceAutoApprove: { enabled: true },
+              },
+            },
+          },
+        },
+        expectedCheckId: "gateway.trusted_proxy_device_auto_approve",
         expectedSeverity: "warn",
       },
     ];

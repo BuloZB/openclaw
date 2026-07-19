@@ -1,3 +1,5 @@
+// Sms tests cover inbound plugin behavior.
+import { expectDefined } from "@openclaw/normalization-core";
 import { describe, expect, it, vi } from "vitest";
 import { dispatchSmsInboundEvent, type SmsChannelRuntime } from "./inbound.js";
 import type { sendSmsViaTwilio as sendSmsViaTwilioType } from "./twilio.js";
@@ -36,6 +38,7 @@ function createRuntime() {
   const resolveAgentRoute = vi.fn();
   const run = vi.fn<
     (params: {
+      turnAdoptionLifecycle?: { onAdopted: () => void | Promise<void> };
       adapter: {
         ingest: (msg: {
           from: string;
@@ -44,7 +47,9 @@ function createRuntime() {
           messageSid: string;
           accountSid: string;
         }) => unknown;
-        resolveTurn: (ingested: unknown) => Promise<{ routeSessionKey: string }>;
+        resolveTurn: (
+          ingested: unknown,
+        ) => Promise<{ route: { agentId: string; sessionKey: string } }>;
       };
     }) => void
   >();
@@ -89,6 +94,7 @@ describe("dispatchSmsInboundEvent", () => {
       cfg: {},
       account: createAccount(),
       channelRuntime: runtime,
+      receivedAt: 1_700_000_000_000,
       msg: {
         from: "+15551234567",
         to: "+15557654321",
@@ -109,15 +115,12 @@ describe("dispatchSmsInboundEvent", () => {
       meta: undefined,
     });
     expect(sendSmsViaTwilio).toHaveBeenCalledOnce();
-    const firstSendCall = sendSmsViaTwilio.mock.calls[0];
-    expect(firstSendCall).toBeDefined();
-    if (!firstSendCall) {
-      throw new Error("Expected SMS send call");
-    }
-    expect(firstSendCall[0]).toMatchObject({
-      to: "+15551234567",
-    });
-    expect(firstSendCall[0].text).toContain("PAIR123");
+    expect(sendSmsViaTwilio).toHaveBeenCalledWith(
+      expect.objectContaining({
+        to: "+15551234567",
+        text: expect.stringContaining("PAIR123"),
+      }),
+    );
   });
 
   it("uses the canonical routed session key for authorized SMS turns", async () => {
@@ -129,6 +132,7 @@ describe("dispatchSmsInboundEvent", () => {
     });
     buildContext.mockReturnValue({ SessionKey: "agent:main:sms:direct:+15551234567" });
     resolveStorePath.mockReturnValue("/tmp/openclaw-sessions");
+    const turnAdoptionLifecycle = { onAdopted: vi.fn(async () => undefined) };
 
     await dispatchSmsInboundEvent({
       cfg: {},
@@ -137,6 +141,8 @@ describe("dispatchSmsInboundEvent", () => {
         allowFrom: ["+15551234567"],
       }),
       channelRuntime: runtime,
+      receivedAt: 1_700_000_000_123,
+      turnAdoptionLifecycle,
       msg: {
         from: "+15551234567",
         to: "+15557654321",
@@ -146,7 +152,8 @@ describe("dispatchSmsInboundEvent", () => {
       },
     });
 
-    const runParams = run.mock.calls[0]?.[0];
+    const runParams = expectDefined(run.mock.calls[0]?.[0], "SMS inbound run parameters");
+    expect(runParams.turnAdoptionLifecycle).toBe(turnAdoptionLifecycle);
     const ingested = runParams.adapter.ingest({
       from: "+15551234567",
       to: "+15557654321",
@@ -156,14 +163,24 @@ describe("dispatchSmsInboundEvent", () => {
     });
     const turn = await runParams.adapter.resolveTurn(ingested);
 
+    expect(resolveAgentRoute).toHaveBeenCalledWith(
+      expect.objectContaining({
+        peer: { kind: "direct", id: "+15551234567" },
+      }),
+    );
     expect(buildContext).toHaveBeenCalledWith(
       expect.objectContaining({
+        timestamp: 1_700_000_000_123,
+        from: "sms:+15551234567",
+        sender: expect.objectContaining({ id: "+15551234567" }),
+        conversation: expect.objectContaining({ id: "+15551234567" }),
+        reply: { to: "sms:+15551234567" },
         route: expect.objectContaining({
           routeSessionKey: "agent:main:sms:direct:+15551234567",
           dispatchSessionKey: "agent:main:sms:direct:+15551234567",
         }),
       }),
     );
-    expect(turn.routeSessionKey).toBe("agent:main:sms:direct:+15551234567");
+    expect(turn.route.sessionKey).toBe("agent:main:sms:direct:+15551234567");
   });
 });

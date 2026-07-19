@@ -1,3 +1,4 @@
+// Device auth store helpers persist and normalize paired device auth records.
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import {
   type DeviceAuthEntry,
@@ -8,7 +9,7 @@ import {
 export type { DeviceAuthEntry, DeviceAuthStore } from "./device-auth.js";
 
 /** Storage seam used by shared device-auth helpers and filesystem-backed infra wrappers. */
-export type DeviceAuthStoreAdapter = {
+type DeviceAuthStoreAdapter = {
   readStore: () => DeviceAuthStore | null;
   writeStore: (store: DeviceAuthStore) => void;
 };

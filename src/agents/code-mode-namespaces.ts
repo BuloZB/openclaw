@@ -1,16 +1,24 @@
+/**
+ * Registry and runtime projection for code-mode namespaces. Plugins register
+ * namespaced tool scopes here; code mode receives descriptors, virtual API
+ * files, and a guarded invocation runtime.
+ */
 import { isRecord } from "../../packages/normalization-core/src/record-coerce.js";
+import { toCodeModeJsonSafe } from "./code-mode-json.js";
 
 const FORBIDDEN_NAMESPACE_PATH_SEGMENTS = new Set(["__proto__", "constructor", "prototype"]);
 const NAMESPACE_PATH_KEY_SEPARATOR = "\u0000";
 const CODE_MODE_NAMESPACE_TOOL_CALL = Symbol.for("openclaw.codeMode.namespaceToolCall");
 const RESERVED_NAMESPACE_GLOBALS = new Set([
   "ALL_TOOLS",
+  "agents",
   "API",
   "Array",
   "Boolean",
   "Date",
   "Error",
   "globalThis",
+  "log",
   "json",
   "JSON",
   "Map",
@@ -20,6 +28,7 @@ const RESERVED_NAMESPACE_GLOBALS = new Set([
   "Number",
   "Object",
   "Promise",
+  "phase",
   "Set",
   "String",
   "text",
@@ -28,7 +37,8 @@ const RESERVED_NAMESPACE_GLOBALS = new Set([
 ]);
 const CODE_MODE_NAMESPACE_REGISTRY_KEY = Symbol.for("openclaw.codeMode.namespaces");
 
-export type CodeModeNamespaceContext = {
+/** Runtime context passed to plugin code-mode namespace scope factories. */
+type CodeModeNamespaceContext = {
   config?: unknown;
   runtimeConfig?: unknown;
   agentId?: string;
@@ -40,11 +50,14 @@ export type CodeModeNamespaceContext = {
   executeTool?: unknown;
 };
 
-export type CodeModeNamespaceScope = Record<string, unknown>;
+/** Object installed into a code-mode namespace global. */
+type CodeModeNamespaceScope = Record<string, unknown>;
 
-export type CodeModeNamespaceToolInputMapper = (args: unknown[]) => unknown;
+/** Maps JavaScript namespace function arguments into a tool input payload. */
+type CodeModeNamespaceToolInputMapper = (args: unknown[]) => unknown;
 
-export type CodeModeNamespaceToolCall = {
+/** Marker object used inside namespace scopes to represent a tool invocation. */
+type CodeModeNamespaceToolCall = {
   readonly [CODE_MODE_NAMESPACE_TOOL_CALL]: true;
   readonly toolName: string;
   readonly catalogId?: string;
@@ -52,7 +65,8 @@ export type CodeModeNamespaceToolCall = {
   readonly input?: CodeModeNamespaceToolInputMapper;
 };
 
-export type CodeModeNamespaceRegistration = {
+/** Plugin registration contract for one code-mode namespace. */
+type CodeModeNamespaceRegistration = {
   id: string;
   globalName: string;
   description?: string;
@@ -63,16 +77,19 @@ export type CodeModeNamespaceRegistration = {
   ): CodeModeNamespaceScope | Promise<CodeModeNamespaceScope>;
 };
 
-export type RegisteredCodeModeNamespace = CodeModeNamespaceRegistration & {
+/** Registration with the owning plugin id attached. */
+type RegisteredCodeModeNamespace = CodeModeNamespaceRegistration & {
   pluginId: string;
 };
 
+/** JSON-serializable descriptor value emitted to the code-mode runtime. */
 export type SerializedCodeModeNamespaceValue =
   | { kind: "array"; items: SerializedCodeModeNamespaceValue[] }
   | { kind: "function"; path: string[] }
   | { kind: "object"; entries: Array<[string, SerializedCodeModeNamespaceValue]> }
   | { kind: "value"; value: unknown };
 
+/** Descriptor sent to code mode for one visible namespace. */
 export type CodeModeNamespaceDescriptor = {
   id: string;
   globalName: string;
@@ -102,6 +119,7 @@ type CodeModeNamespaceCatalogEntry = {
   };
 };
 
+/** Runtime dispatcher for invoking callable namespace paths. */
 export type CodeModeNamespaceRuntime = {
   descriptors: CodeModeNamespaceDescriptor[];
   invoke(
@@ -156,6 +174,7 @@ function normalizeRequiredToolNames(value: readonly string[] | undefined): strin
   return [...names].toSorted();
 }
 
+/** Creates a namespace function marker for a plugin-owned tool. */
 export function createCodeModeNamespaceTool(
   toolName: string,
   input?: CodeModeNamespaceToolInputMapper,
@@ -248,6 +267,7 @@ function normalizeRegistration(
   };
 }
 
+/** Registers a plugin namespace after validating id/global/tool contracts. */
 export function registerCodeModeNamespaceForPlugin(
   pluginId: string,
   registration: CodeModeNamespaceRegistration,
@@ -267,18 +287,24 @@ export function registerCodeModeNamespaceForPlugin(
   registryState.registrations.set(normalized.id, normalized);
 }
 
-export function unregisterCodeModeNamespace(namespaceId: string): boolean {
-  return registryState.registrations.delete(namespaceId.trim());
-}
-
-export function listCodeModeNamespaces(): RegisteredCodeModeNamespace[] {
+/** Lists registered namespaces in deterministic id order. */
+function listCodeModeNamespaces(): RegisteredCodeModeNamespace[] {
   return [...registryState.registrations.values()].toSorted((a, b) => a.id.localeCompare(b.id));
 }
 
-export function clearCodeModeNamespacesForTest(): void {
+/** Clears all namespace registrations for isolated tests. */
+function clearCodeModeNamespacesForTest(): void {
   registryState.registrations.clear();
 }
 
+if (process.env.VITEST || process.env.NODE_ENV === "test") {
+  (globalThis as Record<PropertyKey, unknown>)[Symbol.for("openclaw.codeModeNamespacesTestApi")] = {
+    clearCodeModeNamespacesForTest,
+    listCodeModeNamespaces,
+  };
+}
+
+/** Clears namespace registrations owned by one plugin. */
 export function clearCodeModeNamespacesForPlugin(pluginId: string): void {
   const normalized = pluginId.trim();
   for (const registration of registryState.registrations.values()) {
@@ -553,10 +579,12 @@ type McpApiServerDoc = {
   tools: McpApiToolDoc[];
 };
 
+/** Virtual TypeScript-style API file exposed to code mode. */
 export type CodeModeApiVirtualFile = {
   path: string;
   description?: string;
   content: string;
+  bytes: number;
 };
 
 function buildMcpParamDocs(schema: unknown): McpApiParamDoc[] {
@@ -847,25 +875,66 @@ function createMcpNamespaceScope(
   return createMcpNamespaceModel(catalog)?.root;
 }
 
+const SWARM_AGENTS_API_CONTENT = `type AgentJsonSchema = Record<string, unknown>;
+
+interface AgentRunOptions {
+  label?: string;
+  model?: string;
+  thinking?: string;
+  fastMode?: boolean | "auto";
+  agentId?: string;
+  schema?: AgentJsonSchema;
+  phase?: string;
+}
+
+interface AgentsApi {
+  run(prompt: string, options?: AgentRunOptions & { schema?: undefined }): Promise<string>;
+  run<T>(prompt: string, options: AgentRunOptions & { schema: AgentJsonSchema }): Promise<T>;
+}
+
+/** Spawn collector agents concurrently. */
+declare const agents: Readonly<AgentsApi>;
+/** Publish a phase heading for this swarm. */
+declare function phase(title: string): void;
+/** Publish a progress note for this swarm. */
+declare function log(message: string): void;
+
+// Fan-out: const reports = await Promise.all(prompts.map((prompt) => agents.run(prompt)));
+// Gate: while (!ready) { ready = await agents.run("Check readiness") === "ready"; }
+// Cycle: for (let pass = 0; pass < 3; pass++) draft = await agents.run("Improve: " + draft);
+// Schema: const fact = await agents.run<{ answer: string }>("Research", { schema: { type: "object", properties: { answer: { type: "string" } }, required: ["answer"] } });
+`;
+
+/** Builds virtual API declaration files for visible guest and MCP namespace tools. */
 export function createCodeModeApiVirtualFiles(
   catalog: readonly CodeModeNamespaceCatalogEntry[] = [],
 ): CodeModeApiVirtualFile[] {
-  const model = createMcpNamespaceModel(catalog);
-  if (!model) {
-    return [];
-  }
   const files: CodeModeApiVirtualFile[] = [
     {
-      path: "mcp/index.d.ts",
-      description: "Root MCP namespace declaration and server list.",
-      content: renderMcpRootFile(model.docs),
+      path: "agents.d.ts",
+      description: "Swarm collector globals and orchestration idioms.",
+      content: SWARM_AGENTS_API_CONTENT,
+      bytes: Buffer.byteLength(SWARM_AGENTS_API_CONTENT, "utf8"),
     },
   ];
+  const model = createMcpNamespaceModel(catalog);
+  if (!model) {
+    return files;
+  }
+  const rootContent = renderMcpRootFile(model.docs);
+  files.push({
+    path: "mcp/index.d.ts",
+    description: "Root MCP namespace declaration and server list.",
+    content: rootContent,
+    bytes: Buffer.byteLength(rootContent, "utf8"),
+  });
   for (const server of model.docs) {
+    const content = renderMcpServerHeader(server, server.tools);
     files.push({
       path: `mcp/${server.identifier}.d.ts`,
       description: `MCP server declaration for ${server.serverName}.`,
-      content: renderMcpServerHeader(server, server.tools),
+      content,
+      bytes: Buffer.byteLength(content, "utf8"),
     });
   }
   return files;
@@ -920,6 +989,7 @@ function describeMcpNamespaceForPrompt(
   ];
 }
 
+/** Builds system-prompt text describing visible code-mode namespace globals. */
 export function describeCodeModeNamespacesForPrompt(
   ctx: CodeModeNamespaceContext,
   catalog?: readonly CodeModeNamespaceCatalogEntry[],
@@ -945,35 +1015,6 @@ export function describeCodeModeNamespacesForPrompt(
     }
   }
   return lines.join("\n");
-}
-
-function toJsonSafe(value: unknown): unknown {
-  if (value === undefined) {
-    return null;
-  }
-  try {
-    const serialized = JSON.stringify(value);
-    return serialized === undefined ? null : (JSON.parse(serialized) as unknown);
-  } catch {
-    if (value instanceof Error) {
-      return { name: value.name, message: value.message };
-    }
-    if (value === null) {
-      return null;
-    }
-    switch (typeof value) {
-      case "string":
-      case "number":
-      case "boolean":
-        return value;
-      case "bigint":
-      case "symbol":
-      case "function":
-        return String(value);
-      default:
-        return Object.prototype.toString.call(value);
-    }
-  }
 }
 
 function assertNamespacePathSegment(segment: string): void {
@@ -1006,7 +1047,7 @@ function serializeNamespaceScopeValue(
     );
   }
   if (value === null || typeof value !== "object") {
-    return { kind: "value", value: toJsonSafe(value) };
+    return { kind: "value", value: toCodeModeJsonSafe(value) };
   }
   if (stack.has(value)) {
     throw new Error(`Circular code mode namespace scope at ${path.join(".") || "(root)"}.`);
@@ -1062,6 +1103,7 @@ function readScope(value: unknown, id: string): CodeModeNamespaceScope {
   return value;
 }
 
+/** Creates the runtime descriptor/invocation layer for visible namespaces. */
 export async function createCodeModeNamespaceRuntime(
   ctx: CodeModeNamespaceContext,
   catalog: readonly CodeModeNamespaceCatalogEntry[] = [],
@@ -1111,12 +1153,12 @@ export async function createCodeModeNamespaceRuntime(
       }
       const input = target.input ? await target.input(args) : (args[0] ?? {});
       if (target.local) {
-        return toJsonSafe(input);
+        return toCodeModeJsonSafe(input);
       }
       if (!target.catalogId && !entry.registration.requiredToolNames.includes(target.toolName)) {
         throw new Error(`Code mode namespace path targets undeclared tool: ${target.toolName}`);
       }
-      return toJsonSafe(
+      return toCodeModeJsonSafe(
         await executeTool({
           pluginId: entry.registration.pluginId,
           toolName: target.toolName,
@@ -1129,3 +1171,4 @@ export async function createCodeModeNamespaceRuntime(
     },
   };
 }
+/* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */

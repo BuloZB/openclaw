@@ -1,3 +1,4 @@
+// Google provider module implements model/runtime integration.
 import type {
   OpenClawPluginApi,
   ProviderReasoningOutputModeContext,
@@ -21,6 +22,7 @@ import {
   createGoogleGenerativeAiTransportStreamFn,
   createGoogleVertexTransportStreamFn,
 } from "./transport-stream.js";
+import { resolveGoogleVertexConfigApiKey } from "./vertex-adc.js";
 
 function resolveGoogleReasoningOutputMode(
   ctx: ProviderReasoningOutputModeContext,
@@ -46,7 +48,7 @@ export function buildGoogleProvider(): ProviderPlugin {
         providerId: "google",
         methodId: "api-key",
         label: "Google Gemini API key",
-        hint: "AI Studio / Gemini API key",
+        hint: "Free API key from aistudio.google.com/apikey",
         optionKey: "geminiApiKey",
         flagName: "--gemini-api-key",
         envVar: "GEMINI_API_KEY",
@@ -67,6 +69,8 @@ export function buildGoogleProvider(): ProviderPlugin {
       resolveGoogleGenerativeAiTransport({ provider, api, baseUrl }),
     normalizeConfig: ({ provider, providerConfig }) =>
       normalizeGoogleProviderConfig(provider, providerConfig),
+    resolveConfigApiKey: ({ provider, env }) =>
+      provider === "google-vertex" ? resolveGoogleVertexConfigApiKey(env) : undefined,
     staticCatalog: {
       order: "simple",
       run: async () => ({

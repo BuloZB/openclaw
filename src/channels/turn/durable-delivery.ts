@@ -1,3 +1,4 @@
+// Durable final-reply delivery for inbound channel turns.
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import type { ReplyPayload } from "../../auto-reply/reply-payload.js";
 import type { FinalizedMsgContext } from "../../auto-reply/templating.js";
@@ -38,7 +39,7 @@ export type DurableInboundReplyDeliveryParams = DurableInboundReplyDeliveryOptio
 };
 
 /** Outcome of attempting durable final delivery for an inbound reply payload. */
-export type DurableInboundReplyDeliveryResult =
+type DurableInboundReplyDeliveryResult =
   | { status: "not_applicable"; reason: "non_final" }
   | {
       status: "unsupported";
@@ -61,7 +62,7 @@ function resolveDeliveryTarget(params: DurableInboundReplyDeliveryParams): strin
   );
 }
 
-export function resolveDurableInboundReplyToId(
+function resolveDurableInboundReplyToId(
   params: Pick<DurableInboundReplyDeliveryParams, "ctxPayload" | "payload" | "replyToId">,
 ): string | null | undefined {
   // Explicit null means "do not reply to a source message"; do not fall back to context ids.
@@ -206,8 +207,9 @@ export async function deliverInboundReplyWithMessageSendContext(
     mediaAccess: params.mediaAccess,
     silent: params.silent,
     durability,
+    ...(durability === "required" ? { requireUnknownSendReconciliation: true } : {}),
     session,
-    gatewayClientScopes: params.ctxPayload.GatewayClientScopes,
+    gatewayClientScopes: params.ctxPayload.GatewayClientScopes ?? [],
   });
   if (send.status === "failed") {
     return { status: "failed" as const, error: send.error };
@@ -232,6 +234,3 @@ export async function deliverInboundReplyWithMessageSendContext(
   }
   return { status: "handled_visible", delivery };
 }
-
-/** @deprecated Use `deliverInboundReplyWithMessageSendContext`. */
-export const deliverDurableInboundReplyPayload = deliverInboundReplyWithMessageSendContext;

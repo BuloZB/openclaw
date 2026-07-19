@@ -1,13 +1,14 @@
+/** E2E harness for reply directive behavior tests. */
 import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
 import { afterEach, beforeEach, vi } from "vitest";
 import { clearRuntimeAuthProfileStoreSnapshots } from "../agents/auth-profiles.js";
 import { clearSessionStoreCacheForTest } from "../config/sessions.js";
 import { resetSystemEventsForTest } from "../infra/system-events.js";
 import { createEmptyPluginRegistry } from "../plugins/registry-empty.js";
-import type { PluginProviderRegistration } from "../plugins/registry.js";
+import type { PluginRegistry } from "../plugins/registry.js";
 import { resetPluginRuntimeStateForTest, setActivePluginRegistry } from "../plugins/runtime.js";
 import type { ProviderPlugin } from "../plugins/types.js";
-import { resetSkillsRefreshForTest } from "../skills/runtime/refresh.js";
+import { resetSkillsRefreshForTest } from "../skills/runtime/refresh.test-support.js";
 import {
   clearSessionAuthProfileOverrideMock,
   compactEmbeddedAgentSessionMock,
@@ -20,6 +21,8 @@ import {
   runPreparedReplyMock,
   runReplyAgentMock,
 } from "./reply.directive.directive-behavior.e2e-mocks.js";
+
+type PluginProviderRegistration = PluginRegistry["providers"][number];
 
 const DEFAULT_TEST_MODEL_CATALOG: Array<{
   id: string;

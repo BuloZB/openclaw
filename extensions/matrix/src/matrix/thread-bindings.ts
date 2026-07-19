@@ -1,3 +1,4 @@
+// Matrix plugin module implements thread bindings behavior.
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -27,9 +28,7 @@ import {
   resolveBindingKey,
   resolveEffectiveBindingExpiry,
   setBindingRecord,
-  setMatrixThreadBindingIdleTimeoutBySessionKey,
   setMatrixThreadBindingManagerEntry,
-  setMatrixThreadBindingMaxAgeBySessionKey,
   toMatrixBindingTargetKind,
   toSessionBindingRecord,
   type MatrixThreadBindingManager,
@@ -708,9 +707,4 @@ export async function createMatrixThreadBindingManager(params: {
   });
   return manager;
 }
-export {
-  getMatrixThreadBindingManager,
-  resetMatrixThreadBindingsForTests,
-  setMatrixThreadBindingIdleTimeoutBySessionKey,
-  setMatrixThreadBindingMaxAgeBySessionKey,
-};
+export { getMatrixThreadBindingManager, resetMatrixThreadBindingsForTests };

@@ -1,3 +1,4 @@
+// Nostr plugin module implements channel behavior.
 import { describeAccountSnapshot } from "openclaw/plugin-sdk/account-helpers";
 import {
   createScopedDmSecurityResolver,
@@ -136,7 +137,11 @@ export const nostrPlugin: ChannelPlugin<ResolvedNostrAccount> = createChatChanne
       targetResolver: {
         looksLikeId: (input) => {
           const trimmed = input.trim();
-          return trimmed.startsWith("npub1") || /^[0-9a-fA-F]{64}$/.test(trimmed);
+          return (
+            trimmed.startsWith("npub1") ||
+            trimmed.startsWith("NPUB1") ||
+            /^[0-9a-fA-F]{64}$/.test(trimmed)
+          );
         },
         hint: "<npub|hex pubkey|nostr:npub...>",
       },

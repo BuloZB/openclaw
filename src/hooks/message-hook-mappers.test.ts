@@ -1,3 +1,4 @@
+// Message hook mapper tests cover mapping runtime messages into hook payloads.
 import { beforeEach, describe, expect, it } from "vitest";
 import type { FinalizedMsgContext } from "../auto-reply/templating.js";
 import type { ChannelMessagingAdapter } from "../channels/plugins/types.core.js";
@@ -127,54 +128,87 @@ describe("message hook mappers", () => {
     expect(canonical.guildId).toBe("guild-1");
   });
 
+  it("uses the session key as the Control UI conversation id", () => {
+    const canonical = deriveInboundMessageHookContext(
+      makeInboundCtx({
+        From: undefined,
+        To: undefined,
+        OriginatingTo: undefined,
+        Provider: "webchat",
+        Surface: "webchat",
+        OriginatingChannel: "webchat",
+        SessionKey: "agent:main:adopted",
+      }),
+    );
+
+    expect(canonical.channelId).toBe("webchat");
+    expect(canonical.conversationId).toBe("agent:main:adopted");
+  });
+
   it("maps inbound reply metadata into canonical and plugin payloads", () => {
     const canonical = deriveInboundMessageHookContext(
       makeInboundCtx({
         ReplyToId: "discord-message-42",
+        ReplyToIdFull: "discord:channel-1:discord-message-42",
         ReplyToBody: "quoted Discord reply body",
         ReplyToSender: "Ada",
+        ReplyToIsQuote: true,
       }),
     );
 
     expect(canonical.replyToId).toBe("discord-message-42");
+    expect(canonical.replyToIdFull).toBe("discord:channel-1:discord-message-42");
     expect(canonical.replyToBody).toBe("quoted Discord reply body");
     expect(canonical.replyToSender).toBe("Ada");
+    expect(canonical.replyToIsQuote).toBe(true);
 
     expect(toPluginMessageContext(canonical)).toMatchObject({
       replyToId: "discord-message-42",
+      replyToIdFull: "discord:channel-1:discord-message-42",
       replyToBody: "quoted Discord reply body",
       replyToSender: "Ada",
+      replyToIsQuote: true,
     });
 
     const claimContext = toPluginInboundClaimContext(canonical);
     expect(claimContext).toMatchObject({
       replyToId: "discord-message-42",
+      replyToIdFull: "discord:channel-1:discord-message-42",
       replyToBody: "quoted Discord reply body",
       replyToSender: "Ada",
+      replyToIsQuote: true,
     });
 
     const claimEvent = toPluginInboundClaimEvent(canonical);
     expect(claimEvent).toMatchObject({
       replyToId: "discord-message-42",
+      replyToIdFull: "discord:channel-1:discord-message-42",
       replyToBody: "quoted Discord reply body",
       replyToSender: "Ada",
+      replyToIsQuote: true,
     });
     expect(claimEvent.metadata).toMatchObject({
       replyToId: "discord-message-42",
+      replyToIdFull: "discord:channel-1:discord-message-42",
       replyToBody: "quoted Discord reply body",
       replyToSender: "Ada",
+      replyToIsQuote: true,
     });
 
     const receivedEvent = toPluginMessageReceivedEvent(canonical);
     expect(receivedEvent).toMatchObject({
       replyToId: "discord-message-42",
+      replyToIdFull: "discord:channel-1:discord-message-42",
       replyToBody: "quoted Discord reply body",
       replyToSender: "Ada",
+      replyToIsQuote: true,
     });
     expect(receivedEvent.metadata).toMatchObject({
       replyToId: "discord-message-42",
+      replyToIdFull: "discord:channel-1:discord-message-42",
       replyToBody: "quoted Discord reply body",
       replyToSender: "Ada",
+      replyToIsQuote: true,
     });
   });
 
@@ -428,6 +462,24 @@ describe("message hook mappers", () => {
       parentSpanId: undefined,
       callDepth: undefined,
     });
+  });
+
+  it("does not fall back when a channel rejects inbound claim resolution", () => {
+    const canonical = deriveInboundMessageHookContext(
+      makeInboundCtx({
+        Provider: "claim-chat",
+        Surface: "claim-chat",
+        OriginatingChannel: "claim-chat",
+        From: undefined,
+        To: "channel:room-123",
+        OriginatingTo: "channel:room-123",
+        GroupChannel: undefined,
+        GroupSubject: undefined,
+      }),
+    );
+
+    expect(toPluginInboundClaimContext(canonical).conversationId).toBeUndefined();
+    expect(toPluginInboundClaimEvent(canonical).conversationId).toBeUndefined();
   });
 
   it("passes thread parent ids to channel plugin claim resolvers", () => {

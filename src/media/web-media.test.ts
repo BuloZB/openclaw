@@ -1,7 +1,9 @@
+// Web media tests cover loading media for web UI and browser surfaces.
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { expectDefined } from "@openclaw/normalization-core";
 import JSZip from "jszip";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createSolidPngBuffer } from "../../test/helpers/image-fixtures.js";
@@ -9,6 +11,7 @@ import { resolveStateDir } from "../config/paths.js";
 import { resolvePreferredOpenClawTmpDir } from "../infra/tmp-openclaw-dir.js";
 import { createEmptyPluginRegistry } from "../plugins/registry-empty.js";
 import { resetPluginRuntimeStateForTest, setActivePluginRegistry } from "../plugins/runtime.js";
+import { withEnvAsync } from "../test-utils/env.js";
 import { resizeToJpeg } from "./media-services.js";
 import { encodePngRgba, fillPixel } from "./png-encode.js";
 
@@ -29,21 +32,6 @@ let stateDir = "";
 let canvasPngFile = "";
 let workspaceDir = "";
 let workspacePngFile = "";
-
-function installCanvasMediaResolver() {
-  const registry = createEmptyPluginRegistry();
-  registry.hostedMediaResolvers = [
-    {
-      pluginId: "canvas",
-      resolver: (mediaUrl) =>
-        mediaUrl === `${CANVAS_HOST_PATH}/documents/cv_test/collection.media/tiny.png`
-          ? canvasPngFile
-          : null,
-      source: "test",
-    },
-  ];
-  setActivePluginRegistry(registry);
-}
 
 beforeAll(async () => {
   ({
@@ -72,7 +60,6 @@ beforeAll(async () => {
   );
   await fs.mkdir(path.dirname(canvasPngFile), { recursive: true });
   await fs.writeFile(canvasPngFile, Buffer.from(TINY_PNG_BASE64, "base64"));
-  installCanvasMediaResolver();
 });
 
 afterAll(async () => {
@@ -149,7 +136,7 @@ describe("loadWebMedia", () => {
         offset += 1;
         continue;
       }
-      const marker = buffer[offset + 1];
+      const marker = expectDefined(buffer[offset + 1], "buffer[offset + 1] test invariant");
       offset += 2;
       if (marker === 0xd8 || marker === 0xd9 || (marker >= 0xd0 && marker <= 0xd7)) {
         continue;
@@ -326,7 +313,6 @@ describe("loadWebMedia", () => {
   });
 
   it("loads browser-style canvas media paths as managed local files", async () => {
-    installCanvasMediaResolver();
     const result = await loadWebMedia(
       `${CANVAS_HOST_PATH}/documents/cv_test/collection.media/tiny.png`,
       { maxBytes: 1024 * 1024 },
@@ -346,20 +332,14 @@ describe("loadWebMedia", () => {
         source: "test",
       },
       {
-        pluginId: "canvas",
-        resolver: (mediaUrl) =>
-          mediaUrl === `${CANVAS_HOST_PATH}/documents/cv_test/collection.media/tiny.png`
-            ? canvasPngFile
-            : null,
+        pluginId: "hosted-media",
+        resolver: (mediaUrl) => (mediaUrl === "/__test__/hosted/tiny.png" ? canvasPngFile : null),
         source: "test",
       },
     ];
     setActivePluginRegistry(registry);
 
-    const result = await loadWebMedia(
-      `${CANVAS_HOST_PATH}/documents/cv_test/collection.media/tiny.png`,
-      { maxBytes: 1024 * 1024 },
-    );
+    const result = await loadWebMedia("/__test__/hosted/tiny.png", { maxBytes: 1024 * 1024 });
 
     expect(result.kind).toBe("image");
     expect(result.buffer.length).toBeGreaterThan(0);
@@ -571,6 +551,31 @@ describe("loadWebMedia", () => {
     expect(result.fileName).toBe("fake.png");
   });
 
+  it("strips internal media-store UUID suffix from outbound fileName", async () => {
+    const stagedName = "report---a1b2c3d4-5678-90ab-cdef-1234567890ab.png";
+    const mediaDir = path.join(stateDir, "media", "outbound");
+    const stagedFile = path.join(mediaDir, stagedName);
+    await fs.mkdir(mediaDir, { recursive: true });
+    await fs.writeFile(stagedFile, Buffer.from(TINY_PNG_BASE64, "base64"));
+
+    const result = await loadWebMedia(stagedFile, {
+      maxBytes: 1024 * 1024,
+      localRoots: [mediaDir],
+    });
+
+    expect(result.fileName).toBe("report.png");
+  });
+
+  it("preserves non-media-store filenames that match the UUID suffix shape", async () => {
+    const fileName = "report---a1b2c3d4-5678-90ab-cdef-1234567890ab.png";
+    const filePath = path.join(fixtureRoot, fileName);
+    await fs.writeFile(filePath, Buffer.from(TINY_PNG_BASE64, "base64"));
+
+    const result = await loadWebMedia(filePath, createLocalWebMediaOptions());
+
+    expect(result.fileName).toBe(fileName);
+  });
+
   it("uses only the leaf filename from Windows-style sandbox-validated media paths", async () => {
     const result = await loadWebMedia(String.raw`C:\workspace\captures\tiny.png`, {
       maxBytes: 1024 * 1024,
@@ -584,17 +589,14 @@ describe("loadWebMedia", () => {
   });
 
   it("resolves home-relative local media paths through allowed local roots", async () => {
-    vi.stubEnv("OPENCLAW_HOME", fixtureRoot);
-    try {
+    await withEnvAsync({ OPENCLAW_HOME: fixtureRoot }, async () => {
       const result = await loadWebMedia("~/workspace/chart.png", {
         maxBytes: 1024 * 1024,
         localRoots: [workspaceDir],
       });
       expect(result.kind).toBe("image");
       expect(result.buffer.length).toBeGreaterThan(0);
-    } finally {
-      vi.unstubAllEnvs();
-    }
+    });
   });
 
   it("allows validated host-read TXT files", async () => {
@@ -1159,3 +1161,4 @@ describe("loadWebMedia", () => {
     await expectLoadWebMediaErrorCode(loadWebMedia("media://inbound/"), "invalid-path");
   });
 });
+/* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */

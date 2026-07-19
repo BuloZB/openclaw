@@ -1,13 +1,17 @@
+// Thread Ownership plugin entrypoint registers its OpenClaw integration.
 import { resolveLivePluginConfigObject } from "openclaw/plugin-sdk/plugin-config-runtime";
 import { normalizeOptionalString } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { escapeRegExp } from "openclaw/plugin-sdk/text-utility-runtime";
 import {
   definePluginEntry,
   fetchWithSsrFGuard,
+  readProviderJsonResponse,
   ssrfPolicyFromDangerouslyAllowPrivateNetwork,
   type OpenClawConfig,
   type OpenClawPluginApi,
 } from "./api.js";
+
+const THREAD_OWNERSHIP_CONFLICT_BODY_LIMIT_BYTES = 64 * 1024;
 
 type ThreadOwnershipConfig = {
   forwarderUrl?: string;
@@ -95,7 +99,7 @@ export default definePluginEntry({
         currentConfig,
         forwarderUrl: (
           pluginCfg.forwarderUrl ??
-          process.env.SLACK_FORWARDER_URL ??
+          normalizeOptionalString(process.env.SLACK_FORWARDER_URL) ??
           "http://slack-forwarder:8750"
         ).replace(/\/$/, ""),
         abTestChannels: new Set(
@@ -188,9 +192,24 @@ export default definePluginEntry({
             return undefined;
           }
           if (resp.status === 409) {
-            const body = (await resp.json()) as { owner?: string };
+            let owner = "unknown";
+            try {
+              const body = await readProviderJsonResponse<{ owner?: unknown }>(
+                resp,
+                "thread-ownership forwarder conflict",
+                { maxBytes: THREAD_OWNERSHIP_CONFLICT_BODY_LIMIT_BYTES },
+              );
+              if (typeof body.owner === "string" && body.owner) {
+                owner = body.owner;
+              }
+            } catch (error) {
+              // A 409 is authoritative even when its body is malformed or oversized.
+              api.logger.warn?.(
+                `thread-ownership: conflict body unreadable (${String(error)}), cancelling send`,
+              );
+            }
             api.logger.info?.(
-              `thread-ownership: cancelled send to ${channelId}:${threadTs} — owned by ${body.owner}`,
+              `thread-ownership: cancelled send to ${channelId}:${threadTs} — owned by ${owner}`,
             );
             return { cancel: true };
           }

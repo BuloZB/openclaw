@@ -1,3 +1,4 @@
+// Discord plugin module implements thread bindings.manager behavior.
 import {
   registerSessionBindingAdapter,
   unregisterSessionBindingAdapter,
@@ -37,7 +38,7 @@ import {
   normalizeTargetKind,
   normalizeThreadBindingDurationMs,
   normalizeThreadId,
-  rememberRecentUnboundWebhookEcho,
+  refreshUnboundThreadWebhookIdentity,
   removeBindingRecord,
   resolveBindingIdsForSession,
   resolveBindingRecordKey,
@@ -434,7 +435,7 @@ export function createThreadBindingManager(params: {
       if (!removed) {
         return null;
       }
-      rememberRecentUnboundWebhookEcho(removed);
+      refreshUnboundThreadWebhookIdentity(removed);
       if (persist) {
         saveBindingsToDisk();
       }

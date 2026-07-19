@@ -1,9 +1,11 @@
+// Fal provider module implements model/runtime integration.
 import { extensionForMime } from "openclaw/plugin-sdk/media-mime";
 import { resolvePositiveTimerTimeoutMs } from "openclaw/plugin-sdk/number-runtime";
 import { isProviderApiKeyConfigured } from "openclaw/plugin-sdk/provider-auth";
 import {
   assertOkOrThrowHttpError,
   createProviderOperationDeadline,
+  readProviderJsonResponse,
   type ProviderOperationDeadline,
 } from "openclaw/plugin-sdk/provider-http";
 import { readResponseWithLimit } from "openclaw/plugin-sdk/response-limit-runtime";
@@ -97,8 +99,14 @@ type FalQueueResponse = {
 
 let falFetchGuard = fetchWithSsrFGuard;
 
-export function setFalVideoFetchGuardForTesting(impl: typeof fetchWithSsrFGuard | null): void {
+function setFalVideoFetchGuardForTesting(impl: typeof fetchWithSsrFGuard | null): void {
   falFetchGuard = impl ?? fetchWithSsrFGuard;
+}
+
+if (process.env.VITEST === "true") {
+  const key = Symbol.for("openclaw.falTestApi");
+  const api = (Reflect.get(globalThis, key) as Record<string, unknown> | undefined) ?? {};
+  Reflect.set(globalThis, key, { ...api, setVideoFetchGuard: setFalVideoFetchGuardForTesting });
 }
 
 function normalizeFalVideoUrl(value: unknown): string | undefined {
@@ -162,6 +170,21 @@ function readFalQueueResponse(payload: unknown): FalQueueResponse {
     response: payload.response === undefined ? undefined : readFalVideoPayload(payload.response),
     prompt: normalizeOptionalString(payload.prompt),
     error: isRecord(error) ? { message: normalizeOptionalString(error.message) } : undefined,
+  };
+}
+
+function readFalCompletedQueueResult(payload: unknown): FalQueueResponse {
+  if (!isRecord(payload)) {
+    throw new Error(FAL_VIDEO_MALFORMED_RESPONSE);
+  }
+  if (
+    payload.response !== undefined ||
+    (payload.video === undefined && payload.videos === undefined)
+  ) {
+    return readFalQueueResponse(payload);
+  }
+  return {
+    response: readFalVideoPayload(payload),
   };
 }
 
@@ -464,9 +487,12 @@ async function fetchFalJson(params: {
   try {
     await assertOkOrThrowHttpError(response, params.errorContext);
     try {
-      return await response.json();
-    } catch {
-      throw new Error(FAL_VIDEO_MALFORMED_RESPONSE);
+      return await readProviderJsonResponse<unknown>(response, params.errorContext);
+    } catch (error) {
+      if (error instanceof Error && error.message.endsWith(": malformed JSON response")) {
+        throw new Error(FAL_VIDEO_MALFORMED_RESPONSE, { cause: error });
+      }
+      throw error;
     }
   } finally {
     await release();
@@ -508,7 +534,7 @@ async function waitForFalQueueResult(params: {
     }
     lastStatus = status;
     if (status === "COMPLETED") {
-      return readFalQueueResponse(
+      return readFalCompletedQueueResult(
         await fetchFalJson({
           url: params.responseUrl,
           init: {

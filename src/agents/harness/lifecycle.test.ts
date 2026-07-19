@@ -1,16 +1,17 @@
+// Verifies harness lifecycle capability checks, diagnostics, and trace scoping.
 import type { Model } from "openclaw/plugin-sdk/llm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { OPENCLAW_EMBEDDED_CONTEXT_ENGINE_HOST } from "../../context-engine/host-compat.js";
 import type { ContextEngine } from "../../context-engine/types.js";
 import {
-  onInternalDiagnosticEvent,
+  onTrustedInternalDiagnosticEvent,
   resetDiagnosticEventsForTest,
+  type DiagnosticEventPrivateData,
   type DiagnosticEventMetadata,
   type DiagnosticEventPayload,
 } from "../../infra/diagnostic-events.js";
 import {
   getActiveDiagnosticTraceContext,
-  resetDiagnosticTraceContextForTest,
   runWithDiagnosticTraceContext,
   type DiagnosticTraceContext,
 } from "../../infra/diagnostic-trace-context.js";
@@ -75,6 +76,8 @@ function createAttemptResult(): EmbeddedRunAttemptResult {
 }
 
 function createContextEngineRequiringAssembly(): ContextEngine {
+  // Requires the harness to advertise assemble-before-prompt. Tests use this
+  // to prove context-engine capabilities are enforced before runAttempt.
   return {
     info: {
       id: "lossless-claw",
@@ -107,13 +110,21 @@ function captureDiagnosticEvents(
   filter: (event: DiagnosticEventPayload) => boolean = (event) =>
     event.type.startsWith("harness.run."),
 ): {
-  events: Array<{ event: DiagnosticEventPayload; metadata: DiagnosticEventMetadata }>;
+  events: Array<{
+    event: DiagnosticEventPayload;
+    metadata: DiagnosticEventMetadata;
+    privateData: DiagnosticEventPrivateData;
+  }>;
   unsubscribe: () => void;
 } {
-  const events: Array<{ event: DiagnosticEventPayload; metadata: DiagnosticEventMetadata }> = [];
-  const unsubscribe = onInternalDiagnosticEvent((event, metadata) => {
+  const events: Array<{
+    event: DiagnosticEventPayload;
+    metadata: DiagnosticEventMetadata;
+    privateData: DiagnosticEventPrivateData;
+  }> = [];
+  const unsubscribe = onTrustedInternalDiagnosticEvent((event, metadata, privateData) => {
     if (filter(event)) {
-      events.push({ event, metadata });
+      events.push({ event, metadata, privateData });
     }
   });
   return { events, unsubscribe };
@@ -122,7 +133,6 @@ function captureDiagnosticEvents(
 describe("AgentHarness lifecycle runner", () => {
   afterEach(() => {
     resetDiagnosticEventsForTest();
-    resetDiagnosticTraceContextForTest();
   });
 
   it("runs a harness attempt without changing attempt params", async () => {
@@ -212,6 +222,8 @@ describe("AgentHarness lifecycle runner", () => {
       diagnostics.unsubscribe();
     }
 
+    // Harness diagnostics are internal lifecycle facts, so metadata must stay
+    // trusted while the payload preserves enough fields for downstream traces.
     expect(diagnostics.events.map(({ event }) => event.type)).toEqual([
       "harness.run.started",
       "harness.run.completed",
@@ -315,6 +327,41 @@ describe("AgentHarness lifecycle runner", () => {
     expect(attemptResult?.diagnosticTrace).toEqual(harnessTrace);
   });
 
+  it("keeps plugin harness failure messages on the trusted private channel", async () => {
+    const params = createAttemptParams();
+    const harnessTrace = createDiagnosticTrace();
+    const result = {
+      ...createAttemptResult(),
+      promptError: new Error("provider stream failed"),
+    } as EmbeddedRunAttemptResult;
+    const harness: AgentHarness = {
+      id: "codex",
+      label: "Codex",
+      supports: () => ({ supported: true }),
+      runAttempt: async () => result,
+    };
+    const diagnostics = captureDiagnosticEvents(
+      (event) => event.type === "run.completed" || event.type === "harness.run.completed",
+    );
+    try {
+      await runWithDiagnosticTraceContext(harnessTrace, () =>
+        runAgentHarnessLifecycleAttempt(harness, params),
+      );
+      await flushDiagnosticEvents();
+    } finally {
+      diagnostics.unsubscribe();
+    }
+
+    expect(diagnostics.events.map(({ event }) => event.type)).toEqual([
+      "run.completed",
+      "harness.run.completed",
+    ]);
+    for (const { event, privateData } of diagnostics.events) {
+      expect(event).not.toHaveProperty("error");
+      expect(privateData.errorMessage).toBe("provider stream failed");
+    }
+  });
+
   it("emits plugin before-agent-run hook blocks as blocked run completions", async () => {
     resetDiagnosticEventsForTest();
     const params = createAttemptParams();
@@ -385,6 +432,7 @@ describe("AgentHarness lifecycle runner", () => {
     expect(errorEvent?.type).toBe("harness.run.error");
     expect(errorEvent?.phase).toBe("send");
     expect(errorEvent?.errorCategory).toBe("Error");
+    expect(diagnostics.events[1]?.privateData.errorMessage).toBe("codex app-server send failed");
     expect(errorEvent).not.toHaveProperty("cleanupFailed");
     expect(errorEvent?.harnessId).toBe("codex");
     expect(typeof errorEvent?.durationMs).toBe("number");

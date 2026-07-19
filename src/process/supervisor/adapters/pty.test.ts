@@ -1,3 +1,4 @@
+// PTY adapter tests cover PTY lifecycle and termination behavior.
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   expectRealExitWinsOverSigkillFallback,
@@ -115,7 +116,7 @@ describe("createPtyAdapter", () => {
     });
 
     adapter.kill("SIGTERM");
-    expect(signalProcessTreeMock).toHaveBeenCalledWith(1234, "SIGTERM");
+    expect(signalProcessTreeMock).toHaveBeenCalledWith(1234, "SIGTERM", { detached: true });
     expect(ptyKillMock).not.toHaveBeenCalled();
   });
 
@@ -128,7 +129,7 @@ describe("createPtyAdapter", () => {
     });
 
     adapter.kill();
-    expect(signalProcessTreeMock).toHaveBeenCalledWith(1234, "SIGKILL");
+    expect(signalProcessTreeMock).toHaveBeenCalledWith(1234, "SIGKILL", { detached: true });
     expect(ptyKillMock).not.toHaveBeenCalled();
   });
 
@@ -318,7 +319,7 @@ describe("createPtyAdapter", () => {
       });
 
       adapter.kill("SIGKILL");
-      expect(signalProcessTreeMock).toHaveBeenCalledWith(4567, "SIGKILL");
+      expect(signalProcessTreeMock).toHaveBeenCalledWith(4567, "SIGKILL", { detached: true });
       expect(ptyKillMock).not.toHaveBeenCalled();
     } finally {
       if (originalPlatform) {

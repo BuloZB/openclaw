@@ -1,4 +1,10 @@
+/**
+ * Gateway channels.status method tests.
+ */
+
+import { expectDefined } from "@openclaw/normalization-core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { requireRecord } from "../test-helpers.assertions.js";
 import type { GatewayRequestHandlerOptions } from "./types.js";
 
 type ChannelTestPlugin = {
@@ -118,7 +124,10 @@ async function runChannelsStatus(
   overrides?: Partial<GatewayRequestHandlerOptions>,
 ) {
   const respond = vi.fn();
-  await channelsHandlers["channels.status"](createOptions(params, { respond, ...overrides }));
+  await expectDefined(
+    channelsHandlers["channels.status"],
+    'channelsHandlers["channels.status"] test invariant',
+  )(createOptions(params, { respond, ...overrides }));
   return requireRespondPayload(respond);
 }
 
@@ -126,23 +135,19 @@ function channelAccounts(
   payload: Record<string, unknown>,
   channel: string,
 ): Record<string, unknown>[] {
-  const accounts = requireRecord(payload.channelAccounts)[channel] as unknown[];
+  const accounts = requireRecord(payload.channelAccounts, "channel accounts")[channel] as unknown[];
   expect(Array.isArray(accounts)).toBe(true);
-  return accounts.map((account) => requireRecord(account));
+  return accounts.map((account) => requireRecord(account, "channel account"));
 }
 
 function firstChannelAccount(
   payload: Record<string, unknown>,
   channel: string,
 ): Record<string, unknown> {
-  return channelAccounts(payload, channel)[0];
-}
-
-function requireRecord(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("Expected record");
-  }
-  return value as Record<string, unknown>;
+  return expectDefined(
+    channelAccounts(payload, channel)[0],
+    "channelAccounts(payload, channel)[0] test invariant",
+  );
 }
 
 function requireFirstCallArg(mock: { mock: { calls: readonly (readonly unknown[])[] } }) {
@@ -160,7 +165,7 @@ function requireRespondPayload(respond: ReturnType<typeof vi.fn>): Record<string
   }
   expect(call[0]).toBe(true);
   expect(call[2]).toBeUndefined();
-  return requireRecord(call[1]);
+  return requireRecord(call[1], "respond payload");
 }
 
 describe("channelsHandlers channels.status", () => {
@@ -195,12 +200,37 @@ describe("channelsHandlers channels.status", () => {
     expect(mocks.applyPluginAutoEnable).toHaveBeenCalledWith({
       config: {},
     });
-    const snapshotArgs = requireRecord(requireFirstCallArg(mocks.buildChannelAccountSnapshot));
+    const snapshotArgs = requireRecord(
+      requireFirstCallArg(mocks.buildChannelAccountSnapshot),
+      "snapshot args",
+    );
     expect(snapshotArgs.cfg).toBe(autoEnabledConfig);
     expect(snapshotArgs.accountId).toBe("default");
-    const channels = requireRecord(payload.channels);
-    const whatsapp = requireRecord(channels.whatsapp);
+    const channels = requireRecord(payload.channels, "channels payload");
+    const whatsapp = requireRecord(channels.whatsapp, "whatsapp channel");
     expect(whatsapp.configured).toBe(true);
+  });
+
+  it("redacts base URL credentials returned by channel summary hooks", async () => {
+    configureAutoEnabledChannels([
+      createChannelPlugin({
+        buildChannelSummary: () => ({
+          configured: true,
+          baseUrl: [
+            "https://summary-user",
+            ":",
+            "summary-pass",
+            "@chat.example.test/?to",
+            "ken=test",
+          ].join(""),
+        }),
+      }),
+    ]);
+
+    const payload = await runChannelsStatus({ probe: false, timeoutMs: 2000 });
+    const channels = requireRecord(payload.channels, "channels payload");
+    const whatsapp = requireRecord(channels.whatsapp, "whatsapp channel");
+    expect(whatsapp.baseUrl).toBe("https://chat.example.test/?token=***");
   });
 
   it("caps probe timeout before passing it to channel plugins", async () => {
@@ -209,9 +239,12 @@ describe("channelsHandlers channels.status", () => {
     mocks.applyPluginAutoEnable.mockReturnValue({ config: autoEnabledConfig, changes: [] });
     mocks.listChannelPlugins.mockReturnValue([createChannelPlugin({ probeAccount })]);
 
-    await channelsHandlers["channels.status"](createOptions({ probe: true, timeoutMs: 999_999 }));
+    await expectDefined(
+      channelsHandlers["channels.status"],
+      'channelsHandlers["channels.status"] test invariant',
+    )(createOptions({ probe: true, timeoutMs: 999_999 }));
 
-    const probeArgs = requireRecord(requireFirstCallArg(probeAccount));
+    const probeArgs = requireRecord(requireFirstCallArg(probeAccount), "probe args");
     expect(probeArgs.timeoutMs).toBe(30_000);
     expect(probeArgs.cfg).toBe(autoEnabledConfig);
   });
@@ -276,7 +309,7 @@ describe("channelsHandlers channels.status", () => {
     expect(account.accountId).toBe("default");
     expect(String(account.lastError)).toContain("probe failed");
     expect(typeof account.lastProbeAt).toBe("number");
-    const accountProbe = requireRecord(account.probe);
+    const accountProbe = requireRecord(account.probe, "account probe");
     expect(accountProbe.ok).toBe(false);
     expect(String(accountProbe.error)).toContain("probe failed");
   });
@@ -289,15 +322,19 @@ describe("channelsHandlers channels.status", () => {
       mocks.applyPluginAutoEnable.mockReturnValue({ config: autoEnabledConfig, changes: [] });
       mocks.listChannelPlugins.mockReturnValue([createChannelPlugin({ probeAccount })]);
       const respond = vi.fn();
-      const run = channelsHandlers["channels.status"](
-        createOptions({ probe: true, timeoutMs: 1000 }, { respond }),
-      );
+      const run = expectDefined(
+        channelsHandlers["channels.status"],
+        'channelsHandlers["channels.status"] test invariant',
+      )(createOptions({ probe: true, timeoutMs: 1000 }, { respond }));
 
       await vi.advanceTimersByTimeAsync(1000);
       await run;
 
-      const snapshotArgs = requireRecord(requireFirstCallArg(mocks.buildChannelAccountSnapshot));
-      const probe = requireRecord(snapshotArgs.probe);
+      const snapshotArgs = requireRecord(
+        requireFirstCallArg(mocks.buildChannelAccountSnapshot),
+        "snapshot args",
+      );
+      const probe = requireRecord(snapshotArgs.probe, "snapshot probe");
       expect(probe.timedOut).toBe(true);
       const payload = requireRespondPayload(respond);
       expect(payload.partial).toBe(true);
@@ -323,14 +360,45 @@ describe("channelsHandlers channels.status", () => {
     ]);
 
     const payload = await runChannelsStatus({ probe: false, timeoutMs: 1000 });
-    const channels = requireRecord(payload.channels);
-    const whatsapp = requireRecord(channels.whatsapp);
+    const channels = requireRecord(payload.channels, "channels payload");
+    const whatsapp = requireRecord(channels.whatsapp, "whatsapp channel");
     expect(whatsapp.configured).toBe(true);
     expect(String(whatsapp.lastError)).toContain("summary failed");
 
     const account = firstChannelAccount(payload, "whatsapp");
     expect(account.accountId).toBe("default");
     expect(account.configured).toBe(true);
+  });
+
+  it("annotates terminal-disconnect accounts with terminal-disconnect health state", async () => {
+    mocks.applyPluginAutoEnable.mockReturnValue({ config: { autoEnabled: true }, changes: [] });
+    mocks.buildChannelAccountSnapshot.mockResolvedValue({
+      accountId: "default",
+      enabled: true,
+      configured: true,
+      running: false,
+      terminalDisconnect: true,
+    });
+    const respond = vi.fn();
+
+    await expectDefined(
+      channelsHandlers["channels.status"],
+      'channelsHandlers["channels.status"] test invariant',
+    )(createOptions({ probe: false, timeoutMs: 2000 }, { respond }));
+
+    expect(respond).toHaveBeenCalledWith(
+      true,
+      expect.objectContaining({
+        channelAccounts: {
+          whatsapp: [
+            expect.objectContaining({
+              healthState: "terminal-disconnect",
+            }),
+          ],
+        },
+      }),
+      undefined,
+    );
   });
 
   it("annotates unhealthy channel snapshots and includes event-loop health", async () => {
@@ -356,7 +424,10 @@ describe("channelsHandlers channels.status", () => {
     };
     const respond = vi.fn();
 
-    await channelsHandlers["channels.status"](
+    await expectDefined(
+      channelsHandlers["channels.status"],
+      'channelsHandlers["channels.status"] test invariant',
+    )(
       createOptions(
         { probe: false, timeoutMs: 2000 },
         {

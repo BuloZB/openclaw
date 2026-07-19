@@ -1,7 +1,9 @@
+// Protocol Gen script supports OpenClaw repository automation.
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ProtocolSchemas } from "../packages/gateway-protocol/src/schema.js";
+import { listCoreGatewayMethodMetadata } from "../src/gateway/methods/core-descriptors.js";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, "..");
@@ -11,6 +13,9 @@ async function writeJsonSchema() {
   for (const [name, schema] of Object.entries(ProtocolSchemas)) {
     definitions[name] = schema;
   }
+  const methods = Object.fromEntries(
+    listCoreGatewayMethodMetadata().map(({ name, scope, since }) => [name, { since, scope }]),
+  );
 
   const rootSchema = {
     $schema: "http://json-schema.org/draft-07/schema#",
@@ -30,6 +35,7 @@ async function writeJsonSchema() {
         event: "#/definitions/EventFrame",
       },
     },
+    methods,
     definitions,
   };
 

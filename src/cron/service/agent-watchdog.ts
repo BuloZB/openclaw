@@ -1,3 +1,4 @@
+/** Timeout watchdogs for isolated cron agent setup and execution phases. */
 import type {
   CronAgentExecutionPhase,
   CronAgentExecutionPhaseUpdate,
@@ -12,7 +13,7 @@ import {
 import type { CronServiceState } from "./state.js";
 
 const CRON_TIMEOUT_CLEANUP_GUARD_MS = 20_000;
-const CRON_AGENT_SETUP_WATCHDOG_MS = 60_000;
+export const CRON_AGENT_SETUP_WATCHDOG_MS = 60_000;
 const CRON_AGENT_PRE_EXECUTION_WATCHDOG_MS = 60_000;
 const CRON_AGENT_PRE_EXECUTION_MIN_WATCHDOG_MS = 1_000;
 
@@ -45,11 +46,14 @@ const CRON_AGENT_PHASE_WATCHDOG_STAGE = {
 } as const satisfies Record<CronAgentExecutionPhase, CronAgentPhaseWatchdogStage>;
 
 /** Handle for feeding isolated-agent progress into cron timeout watchdogs. */
-export type CronAgentWatchdog = {
+type CronAgentWatchdog = {
   start: () => void;
+  noteLaneWait: () => void;
+  noteLaneAdmitted: () => void;
   noteRunnerStarted: (info?: CronAgentExecutionStarted) => void;
   notePhase: (info: CronAgentExecutionPhaseUpdate) => void;
   activeExecution: () => CronAgentExecutionStarted | undefined;
+  observedLaneWait: () => boolean;
   dispose: () => void;
 };
 
@@ -64,6 +68,7 @@ export function createCronAgentWatchdog(params: {
   let setupTimeoutId: NodeJS.Timeout | undefined;
   let preExecutionTimeoutId: NodeJS.Timeout | undefined;
   let activeExecution: CronAgentExecutionStarted | undefined;
+  let observedLaneWait = false;
 
   const setTimedOut = (reason: string) => {
     if (state === "timed_out" || state === "disposed") {
@@ -111,6 +116,8 @@ export function createCronAgentWatchdog(params: {
     const previousPhase = activeExecution?.phase;
     activeExecution = { ...activeExecution, ...info };
     const stage = info.phase ? CRON_AGENT_PHASE_WATCHDOG_STAGE[info.phase] : undefined;
+    // A fallback attempt can return to setup-like phases after execution began;
+    // re-arm pre-execution timing so the fallback path cannot stall silently.
     if (
       state === "executing" &&
       previousPhase === "before_agent_reply" &&
@@ -122,7 +129,7 @@ export function createCronAgentWatchdog(params: {
       startPreExecutionTimeout();
       return;
     }
-    if (stage === "execution" || info.firstModelCallStarted) {
+    if (stage === "execution") {
       state = "executing";
       clearPreExecutionTimeout();
     }
@@ -139,6 +146,16 @@ export function createCronAgentWatchdog(params: {
         return;
       }
       startTimeout();
+    },
+    noteLaneWait: () => {
+      if (state === "waiting_for_runner") {
+        observedLaneWait = true;
+      }
+    },
+    noteLaneAdmitted: () => {
+      if (state === "waiting_for_runner") {
+        observedLaneWait = false;
+      }
     },
     noteRunnerStarted: (info?: CronAgentExecutionStarted) => {
       if (state === "disposed" || state === "timed_out") {
@@ -159,6 +176,7 @@ export function createCronAgentWatchdog(params: {
       noteExecutionProgress(info);
     },
     activeExecution: () => activeExecution,
+    observedLaneWait: () => observedLaneWait,
     dispose: () => {
       state = "disposed";
       if (timeoutId) {

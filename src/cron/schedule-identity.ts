@@ -1,4 +1,6 @@
+/** Builds stable identities for cron scheduling inputs. */
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
+import { parseCronPacingBounds } from "./pacing.js";
 import { coerceFiniteScheduleNumber } from "./schedule-number.js";
 import { normalizeCronStaggerMs } from "./stagger.js";
 
@@ -34,6 +36,8 @@ function schedulePayloadFromRecord(
   const tz = readString(schedule, "tz");
   const staggerMs = readStaggerMs(schedule);
   const kind =
+    // Infer legacy shorthand schedule shapes when kind is missing so timer
+    // identity remains stable across old persisted jobs and normalized jobs.
     rawKind === "at" || rawKind === "every" || rawKind === "cron"
       ? rawKind
       : at
@@ -65,16 +69,38 @@ function resolveSchedulePayload(
   return undefined;
 }
 
+function resolvePacingPayload(
+  job: CronScheduleIdentityInput,
+): { minMs?: number; maxMs?: number } | null | undefined {
+  if (job.pacing === undefined || job.pacing === null) {
+    return undefined;
+  }
+  if (typeof job.pacing !== "object" || Array.isArray(job.pacing)) {
+    return null;
+  }
+  const pacing = job.pacing as Record<string, unknown>;
+  const min = normalizeOptionalString(pacing.min);
+  const max = normalizeOptionalString(pacing.max);
+  try {
+    return parseCronPacingBounds({ min, max });
+  } catch {
+    return null;
+  }
+}
+
 /** Builds a stable scheduling identity for deciding whether stored timer state is still valid. */
 export function tryCronScheduleIdentity(job: CronScheduleIdentityInput): string | undefined {
   const schedule = resolveSchedulePayload(job);
-  if (!schedule) {
+  const pacing = resolvePacingPayload(job);
+  if (!schedule || pacing === null) {
     return undefined;
   }
   return JSON.stringify({
-    version: 1,
+    version: 2,
     enabled: typeof job.enabled === "boolean" ? job.enabled : true,
     schedule,
+    pacing,
+    hasTrigger: job.trigger !== undefined && job.trigger !== null,
   });
 }
 

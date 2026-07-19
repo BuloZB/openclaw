@@ -1,3 +1,4 @@
+// Qa Lab plugin module implements cron run wait behavior.
 import { setTimeout as sleep } from "node:timers/promises";
 import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import { resolveTimerTimeoutMs } from "openclaw/plugin-sdk/number-runtime";
@@ -14,7 +15,7 @@ type QaCronRunsPage = {
   entries?: QaCronRunLogEntry[];
 };
 
-export function resolveCronRunPollIntervalMs(intervalMs: number | undefined): number {
+function resolveCronRunPollIntervalMs(intervalMs: number | undefined): number {
   return resolveTimerTimeoutMs(intervalMs ?? 1_000, 1_000, 0);
 }
 

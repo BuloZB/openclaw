@@ -1,3 +1,4 @@
+// Matrix helper module supports format behavior.
 import MarkdownIt from "markdown-it";
 import { normalizeLowercaseStringOrEmpty } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { isAutoLinkedFileRef } from "openclaw/plugin-sdk/text-autolink-runtime";
@@ -348,8 +349,14 @@ function compactLooseListTokens(tokens: MarkdownToken[]): void {
         item.immediateParagraphOpenIndexes.length === 1 &&
         item.immediateParagraphCloseIndexes.length === 1
       ) {
-        tokens[item.immediateParagraphOpenIndexes[0]].hidden = true;
-        tokens[item.immediateParagraphCloseIndexes[0]].hidden = true;
+        const openIndex = item.immediateParagraphOpenIndexes[0];
+        const closeIndex = item.immediateParagraphCloseIndexes[0];
+        const openToken = openIndex === undefined ? undefined : tokens[openIndex];
+        const closeToken = closeIndex === undefined ? undefined : tokens[closeIndex];
+        if (openToken && closeToken) {
+          openToken.hidden = true;
+          closeToken.hidden = true;
+        }
       }
       continue;
     }
