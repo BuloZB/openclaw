@@ -319,6 +319,7 @@ Do not edit it by hand; run `pnpm docs:map:gen`.
   - H3: JSON5 reference
   - H3: Account config keys
   - H2: Multiple bots
+  - H2: Session discussions
   - H2: Reply modes
   - H2: Command menu
   - H2: Durable media delivery
@@ -5599,7 +5600,6 @@ Do not edit it by hand; run `pnpm docs:map:gen`.
   - H2: Public capability model
   - H3: External compatibility stance
   - H3: Plugin shapes
-  - H3: Legacy hooks
   - H3: Compatibility signals
   - H2: Architecture overview
   - H3: Plugin metadata snapshot and lookup table
@@ -7502,7 +7502,7 @@ Do not edit it by hand; run `pnpm docs:map:gen`.
   - H2: Removed compatibility surfaces
   - H3: Process-global API-provider publication
   - H3: Private testing barrel
-  - H2: Active deprecations
+  - H2: Migration reference
   - H2: Talk and realtime voice migration
   - H2: Removal timeline
   - H2: Suppressing the warnings temporarily
@@ -7579,8 +7579,8 @@ Do not edit it by hand; run `pnpm docs:map:gen`.
 - Route: /plugins/sdk-subpaths
 - Headings:
   - H2: Plugin entry
-  - H3: Deprecated compatibility and test helpers
-  - H3: Reserved bundled plugin helper subpaths
+  - H3: Compatibility and private-local helpers
+  - H3: Bundled plugin helper subpaths
   - H2: Related
 
 ## plugins/sdk-testing.md
@@ -10435,6 +10435,7 @@ Do not edit it by hand; run `pnpm docs:map:gen`.
   - H3: Loop on a decision gate
   - H3: Process the first child that finishes
   - H2: How collector children behave
+  - H3: Children are leaves
   - H2: Observe a Swarm
   - H2: Use Swarm from other harnesses
   - H2: Limits and roadmap
