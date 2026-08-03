@@ -202,9 +202,7 @@ export const mockedAcquireAgentRunPreparedModelRuntime = vi.fn(
   },
 );
 const mockedRunPostCompactionSideEffects = vi.fn(async () => {});
-export const mockedSleepWithAbort = vi.fn(
-  async (_ms: number, _abortSignal?: AbortSignal) => undefined,
-);
+const mockedSleepWithAbort = vi.fn(async (_ms: number, _abortSignal?: AbortSignal) => undefined);
 function createMockAgentDiscoveryStores(): MockAgentDiscoveryStores {
   return {
     authStorage: {
@@ -251,7 +249,7 @@ const mockedPrepareProviderRuntimeAuth = vi.fn<
 >(async () => undefined);
 export const mockedRunEmbeddedAttempt =
   vi.fn<(params: unknown) => Promise<EmbeddedRunAttemptResult>>();
-export const mockedBuildEmbeddedRunPayloads = vi.fn<
+const mockedBuildEmbeddedRunPayloads = vi.fn<
   (
     ...args: Parameters<typeof buildEmbeddedRunPayloads>
   ) => ReturnType<typeof buildEmbeddedRunPayloads>
@@ -307,7 +305,7 @@ const mockedDescribeFailoverError = vi.fn<MockDescribeFailoverError>(
 );
 const mockedResolveFailoverStatus = vi.fn<MockResolveFailoverStatus>();
 
-export const mockedLog: {
+const mockedLog: {
   debug: Mock<(...args: unknown[]) => void>;
   info: Mock<(...args: unknown[]) => void>;
   warn: Mock<(...args: unknown[]) => void>;
@@ -815,6 +813,11 @@ export async function loadRunOverflowCompactionHarness(): Promise<{
     prepareProviderExtraParams: vi.fn(async () => ({})),
     wrapProviderStreamFn: vi.fn((_cfg: unknown, _model: unknown, fn: unknown) => fn),
   }));
+  // Runtime preparation already carries the fixture's provider facts. Keep the
+  // real handle shape without rediscovering every bundled provider plugin.
+  vi.doMock("../../plugins/provider-hook-runtime.js", () => ({
+    resolveProviderRuntimePluginHandle: vi.fn((params: Record<string, unknown>) => params),
+  }));
   vi.doMock("../auth-profiles.js", () => ({
     isProfileInCooldown: mockedIsProfileInCooldown,
     markAuthProfileFailure: mockedMarkAuthProfileFailure,
@@ -1008,6 +1011,21 @@ export async function loadRunOverflowCompactionHarness(): Promise<{
     resolveAuthProfileOrderWithMetadata: mockedResolveAuthProfileOrderWithMetadata,
     resolveProviderEntryApiKeyProfileReference: mockedResolveProviderEntryApiKeyProfileReference,
     shouldPreferExplicitConfigApiKeyAuth: mockedShouldPreferExplicitConfigApiKeyAuth,
+  }));
+
+  // Auth policy remains real; only manifest-derived discovery facts are
+  // prepared here so the shared runner does not rescan all bundled plugins.
+  vi.doMock("../model-auth-env-vars.js", () => ({
+    listKnownProviderEnvApiKeyNames: vi.fn(() => ["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"]),
+    listProviderEnvAuthLookupKeys: vi.fn(() => ["anthropic"]),
+    resolveProviderEnvAuthLookupMaps: vi.fn(() => ({
+      aliasMap: {},
+      envCandidateMap: {
+        anthropic: ["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
+      },
+      authEvidenceMap: {},
+      setupProviderFallbackRefs: ["anthropic"],
+    })),
   }));
 
   vi.doMock("../models-config.js", () => ({
