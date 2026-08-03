@@ -26,10 +26,14 @@ const agentEventMocks = vi.hoisted(() => {
       }
     }),
     getAgentEventLifecycleGeneration: vi.fn(() => "test-generation"),
+    isAgentEventLifecycleGenerationCurrent: vi.fn(
+      (generation: string) => generation === "test-generation",
+    ),
     onAgentEvent: vi.fn((handler: (event: AgentEvent) => void) => {
       handlers.add(handler);
       return () => handlers.delete(handler);
     }),
+    registerAgentEventLifecycleRotationHandler: vi.fn(),
     registerAgentRunContext: vi.fn(),
     withAgentRunLifecycleGeneration: vi.fn((_generation: string, run: () => unknown) => run()),
   };
@@ -48,6 +52,10 @@ const attemptExecutionMocks = vi.hoisted(() => ({
 }));
 
 vi.mock("../infra/agent-events.js", () => agentEventMocks);
+vi.mock("../infra/agent-run-registry.js", () => ({
+  clearAgentRunContext: agentEventMocks.clearAgentRunContext,
+  registerAgentRunContext: agentEventMocks.registerAgentRunContext,
+}));
 
 vi.mock("../agents/command/delivery.runtime.js", () => ({
   deliverAgentCommandResult: vi.fn(

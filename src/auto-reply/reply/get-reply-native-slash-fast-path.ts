@@ -6,6 +6,7 @@ import {
 } from "../../agents/model-selection.js";
 import { loadPreparedModelCatalog } from "../../agents/prepared-model-catalog.js";
 import type { OpenClawConfig } from "../../config/config.js";
+import { recordSessionCreated } from "../../sessions/session-state-events.js";
 import { createLazyImportLoader } from "../../shared/lazy-promise.js";
 import type { SkillCommandSpec } from "../../skills/types.js";
 import { isInternalMessageChannel } from "../../utils/message-channel.js";
@@ -16,7 +17,7 @@ import {
 } from "../command-turn-context.js";
 import type { GetReplyOptions } from "../get-reply-options.types.js";
 import { markCommandReplyForDelivery, type ReplyPayload } from "../reply-payload.js";
-import type { MsgContext } from "../templating.js";
+import type { FinalizedRuntimeMsgContext as MsgContext } from "../templating.js";
 import { normalizeThinkLevel, type ThinkLevel } from "../thinking.js";
 import {
   takeCommandSessionMetadataChangesFromTargets,
@@ -60,9 +61,7 @@ function resolveNativeSlashCommandName(ctx: MsgContext): string | undefined {
   if (!isNativeCommandTurn(commandTurn) && !isAuthorizedTextSlashCommandTurn(commandTurn)) {
     return undefined;
   }
-  const commandText = stripStructuralPrefixes(
-    ctx.BodyForCommands ?? ctx.CommandBody ?? ctx.RawBody ?? ctx.Body ?? "",
-  ).trim();
+  const commandText = stripStructuralPrefixes(ctx.commandText ?? "").trim();
   const match = commandText.match(/^\/([^\s:]+)(?::|\s|$)/);
   return normalizeOptionalString(match?.[1])?.toLowerCase();
 }
@@ -169,6 +168,13 @@ export async function maybeResolveNativeSlashCommandFastReply(params: {
       };
     }
     const persistedInitialEntry = persistence.entry;
+    if (creatingSession) {
+      recordSessionCreated({
+        sessionKey: sessionState.sessionKey,
+        agentId: params.agentId,
+        entry: persistedInitialEntry,
+      });
+    }
     // Commit the synthesized activity/channel touch before commands or directives
     // capture their own mutation baseline.
     sessionState.sessionEntry = persistedInitialEntry;
@@ -251,44 +257,51 @@ export async function maybeResolveNativeSlashCommandFastReply(params: {
     return loadedSkillCommands;
   };
 
-  const commandResult = await (
-    await loadCommandsRuntime()
-  ).handleCommands({
-    ctx: sessionState.sessionCtx,
-    rootCtx: params.ctx,
-    cfg: params.cfg,
-    command,
-    agentId: params.agentId,
-    agentDir: params.agentDir,
-    directives: clearInlineDirectives(sessionState.triggerBodyNormalized),
-    elevated: {
-      enabled: false,
-      allowed: false,
-      failures: [],
-    },
-    sessionEntry: sessionState.sessionEntry,
-    previousSessionEntry: sessionState.previousSessionEntry,
-    sessionStore: sessionState.sessionStore,
-    sessionKey: sessionState.sessionKey,
-    storePath: sessionState.storePath,
-    sessionScope: sessionState.sessionScope,
-    workspaceDir: params.workspaceDir,
-    opts: params.opts,
-    defaultGroupActivation: () => "always",
-    resolvedThinkLevel: undefined,
-    resolvedVerboseLevel: "off",
-    resolvedReasoningLevel: "off",
-    resolvedElevatedLevel: "off",
-    blockReplyChunking: undefined,
-    resolvedBlockStreamingBreak: "text_end",
-    resolveDefaultThinkingLevel: async () => undefined,
-    provider: params.provider,
-    model: params.model,
-    contextTokens: params.agentCfg?.contextTokens ?? 0,
-    isGroup: sessionState.isGroup,
-    loadSkillCommands: loadNativeSkillCommands,
-    typing: params.typing,
-  });
+  // Compact needs the canonical model owner before consuming a provider-specific transcript.
+  const compactNeedsModelSelection =
+    command.isAuthorizedSender &&
+    (command.commandBodyNormalized === "/compact" ||
+      command.commandBodyNormalized.startsWith("/compact "));
+  const commandResult = compactNeedsModelSelection
+    ? { shouldContinue: true, reply: undefined }
+    : await (
+        await loadCommandsRuntime()
+      ).handleCommands({
+        ctx: sessionState.sessionCtx,
+        rootCtx: params.ctx,
+        cfg: params.cfg,
+        command,
+        agentId: params.agentId,
+        agentDir: params.agentDir,
+        directives: clearInlineDirectives(sessionState.triggerBodyNormalized),
+        elevated: {
+          enabled: false,
+          allowed: false,
+          failures: [],
+        },
+        sessionEntry: sessionState.sessionEntry,
+        previousSessionEntry: sessionState.previousSessionEntry,
+        sessionStore: sessionState.sessionStore,
+        sessionKey: sessionState.sessionKey,
+        storePath: sessionState.storePath,
+        sessionScope: sessionState.sessionScope,
+        workspaceDir: params.workspaceDir,
+        opts: params.opts,
+        defaultGroupActivation: () => "always",
+        resolvedThinkLevel: undefined,
+        resolvedVerboseLevel: "off",
+        resolvedReasoningLevel: "off",
+        resolvedElevatedLevel: "off",
+        blockReplyChunking: undefined,
+        resolvedBlockStreamingBreak: "text_end",
+        resolveDefaultThinkingLevel: async () => undefined,
+        provider: params.provider,
+        model: params.model,
+        contextTokens: params.agentCfg?.contextTokens ?? 0,
+        isGroup: sessionState.isGroup,
+        loadSkillCommands: loadNativeSkillCommands,
+        typing: params.typing,
+      });
   const commandSessionMetadataChanges = takeCommandSessionMetadataChangesFromTargets([
     sessionState.sessionCtx,
     params.ctx,
@@ -333,7 +346,7 @@ export async function maybeResolveNativeSlashCommandFastReply(params: {
     skillFilter: params.skillFilter,
   });
   if (directiveResult.kind === "reply") {
-    params.typing.cleanup();
+    // The canonical directive owner already finalizes typing for every terminal reply.
     return { handled: true, reply: markCommandReplyForDelivery(directiveResult.reply) };
   }
 

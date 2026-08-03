@@ -26,6 +26,7 @@ import { safeEqualSecret } from "openclaw/plugin-sdk/security-runtime";
 import {
   normalizeOptionalString,
   normalizeOptionalString as normalizeSlackApiString,
+  normalizeTrimmedStringList,
 } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { sliceUtf16Safe } from "openclaw/plugin-sdk/text-utility-runtime";
 import type { SlackTokenSource } from "./accounts.js";
@@ -38,10 +39,10 @@ import {
   uploadSlackFile,
   withSlackDnsRequestRetry,
 } from "./client-delivery.js";
-import { createSlackTokenCacheKey, createSlackWebClient, getSlackWriteClient } from "./client.js";
+import { createSlackReadClient, createSlackTokenCacheKey, getSlackWriteClient } from "./client.js";
 import { assertSlackDirectSendAllowed } from "./direct-send-admission.js";
 import { chunkSlackMrkdwnText, markdownToSlackMrkdwnChunks } from "./format.js";
-import { SLACK_TEXT_LIMIT } from "./limits.js";
+import { SLACK_EDIT_TEXT_MAX_BYTES, SLACK_TEXT_LIMIT } from "./limits.js";
 import {
   buildSlackNativeDataAccessibilityText,
   hasSlackNativeDataBlock,
@@ -51,7 +52,7 @@ import { buildSlackNativeDataDeliveryPlan } from "./native-data-fallback.js";
 import { recordSlackThreadParticipation } from "./sent-thread-cache.js";
 import { canonicalizeSlackApiTargetId, parseSlackTarget } from "./target-parsing.js";
 import { normalizeSlackThreadTsCandidate, resolveSlackThreadTsValue } from "./thread-ts.js";
-import { truncateSlackText } from "./truncate.js";
+import { truncateSlackText, truncateSlackTextByUtf8Bytes } from "./truncate.js";
 const SLACK_DM_CHANNEL_CACHE_MAX = 1024;
 const SLACK_DELIVERY_METADATA_EVENT = "openclaw_delivery";
 const SLACK_DELIVERY_METADATA_KEY = "openclaw_delivery_id";
@@ -195,16 +196,6 @@ function resolveSlackSendIdentity(params: {
   );
 }
 
-function normalizeSlackScopeList(value: unknown): string[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  return value.flatMap((scope) => {
-    const normalized = normalizeSlackApiString(scope);
-    return normalized ? [normalized] : [];
-  });
-}
-
 function getSlackWebApiErrorData(err: unknown): SlackWebApiErrorData | undefined {
   if (!(err instanceof Error)) {
     return undefined;
@@ -230,11 +221,11 @@ function formatSlackWebApiErrorMessage(err: unknown): string | undefined {
   if (needed) {
     details.push(`needed: ${needed}`);
   }
-  const scopes = normalizeSlackScopeList(data?.response_metadata?.scopes);
+  const scopes = normalizeTrimmedStringList(data?.response_metadata?.scopes);
   if (scopes.length) {
     details.push(`granted: ${scopes.join(", ")}`);
   }
-  const acceptedScopes = normalizeSlackScopeList(data?.response_metadata?.acceptedScopes);
+  const acceptedScopes = normalizeTrimmedStringList(data?.response_metadata?.acceptedScopes);
   if (acceptedScopes.length) {
     details.push(`accepted: ${acceptedScopes.join(", ")}`);
   }
@@ -291,7 +282,7 @@ export async function updateMessageSlack(params: {
   await client.chat.update({
     channel: params.channelId,
     ts: params.messageTs,
-    text: truncateSlackText(params.text, SLACK_TEXT_LIMIT),
+    text: truncateSlackTextByUtf8Bytes(params.text, SLACK_EDIT_TEXT_MAX_BYTES),
     blocks: validateSlackBlocksArray(params.blocks),
   });
 }
@@ -401,6 +392,19 @@ function resolveEnterpriseEventScope(params: {
   return scope;
 }
 
+function resolveSlackTextChunkLimit(params: {
+  cfg: OpenClawConfig;
+  accountId?: string;
+  textLimit?: number;
+}): number {
+  const configuredLimit =
+    params.textLimit ??
+    resolveTextChunkLimit(params.cfg, "slack", params.accountId, {
+      fallbackLimit: SLACK_TEXT_LIMIT,
+    });
+  return Math.min(configuredLimit, SLACK_TEXT_LIMIT);
+}
+
 function resolveSlackTextChunks(params: {
   cfg: OpenClawConfig;
   accountId?: string;
@@ -410,12 +414,7 @@ function resolveSlackTextChunks(params: {
   preservePlainText?: boolean;
 }): string[] {
   const text = params.preservePlainText ? params.text : params.text.trim();
-  const configuredLimit =
-    params.textLimit ??
-    resolveTextChunkLimit(params.cfg, "slack", params.accountId, {
-      fallbackLimit: SLACK_TEXT_LIMIT,
-    });
-  const chunkLimit = Math.min(configuredLimit, SLACK_TEXT_LIMIT);
+  const chunkLimit = resolveSlackTextChunkLimit(params);
   if (params.preservePlainText) {
     const chunks: string[] = [];
     let remaining = text;
@@ -895,7 +894,7 @@ export async function reconcileSlackUnknownSend(
       retryable: false,
     };
   }
-  const readClient = opts?.client ?? createSlackWebClient(readToken);
+  const readClient = opts?.client ?? createSlackReadClient(readToken);
   const writeClient = opts?.client ?? (writeToken ? getSlackWriteClient(writeToken) : undefined);
   const payloadReplyToId = ctx.payloads[0]?.replyToId;
   const effectiveReplyToId = Object.hasOwn(ctx, "effectiveReplyToId")
@@ -1133,14 +1132,22 @@ async function sendMessageSlackQueuedInner(params: {
       ? (explicitNativeDataFallbackBase ?? trimmedMessage)
       : "";
   const hasNativeData = Boolean(blocks && hasSlackNativeDataBlock(blocks));
+  const textChunkLimit = resolveSlackTextChunkLimit({
+    cfg,
+    accountId: account.accountId,
+    ...(opts.textLimit !== undefined ? { textLimit: opts.textLimit } : {}),
+  });
   const usesOrderedBlockAccessibility = Boolean(
     blocks && (hasNativeData || opts.authoredTextPlacement !== undefined),
   );
+  // Slack may auto-split over-limit text while returning only one timestamp.
+  // Plan explicit chunks so every delivered part remains in the receipt.
   const orderedBlockDeliveryPlan =
     blocks && usesOrderedBlockAccessibility
       ? buildSlackNativeDataDeliveryPlan({
           baseText: nativeDataFallbackBase,
           blocks,
+          textLimit: textChunkLimit,
         })
       : undefined;
   const orderedBlockAccessibilityText =
@@ -1309,7 +1316,7 @@ async function sendMessageSlackQueuedInner(params: {
     cfg,
     accountId: account.accountId,
     text: trimmedMessage,
-    ...(opts.textLimit !== undefined ? { textLimit: opts.textLimit } : {}),
+    textLimit: textChunkLimit,
     ...(opts.textIsSlackMrkdwn ? { textIsSlackMrkdwn: true } : {}),
     ...(opts.textIsSlackPlainText ? { preservePlainText: true } : {}),
   });

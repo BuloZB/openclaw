@@ -1,5 +1,6 @@
 import AVFoundation
 import Foundation
+import OpenClawChatUI
 import OpenClawKit
 import Testing
 @testable import OpenClaw
@@ -634,8 +635,78 @@ struct TalkModeManagerTests {
             defaultModelIdFallback: "eleven_v3",
             defaultRealtimeModelIdFallback: "gpt-realtime-2",
             defaultSilenceTimeoutMs: 900)
+        let routing = TalkModeRoutingResolver.resolve(
+            parsed: parsed,
+            providerSelection: .openAIRealtime,
+            defaultProvider: "elevenlabs",
+            defaultRealtimeModelId: "gpt-realtime-2")
 
         #expect(parsed.executionMode == .realtimeWebRTC)
+        #expect(routing.route == .realtimeWebRTC)
+    }
+
+    @Test func `routes forced agent consultation through gateway relay`() {
+        let config: [String: Any] = [
+            "talk": [
+                "realtime": [
+                    "provider": "openai",
+                    "mode": "realtime",
+                    "brain": "agent-consult",
+                    "consultRouting": "force-agent-consult",
+                ],
+            ],
+        ]
+
+        let parsed = TalkModeGatewayConfigParser.parse(
+            config: config,
+            defaultProvider: "elevenlabs",
+            defaultModelIdFallback: "eleven_v3",
+            defaultRealtimeModelIdFallback: "gpt-realtime-2",
+            defaultSilenceTimeoutMs: 900)
+        let gatewayDefaultRouting = TalkModeRoutingResolver.resolve(
+            parsed: parsed,
+            providerSelection: .gatewayDefault,
+            defaultProvider: "elevenlabs",
+            defaultRealtimeModelId: "gpt-realtime-2")
+        let openAIRouting = TalkModeRoutingResolver.resolve(
+            parsed: parsed,
+            providerSelection: .openAIRealtime,
+            defaultProvider: "elevenlabs",
+            defaultRealtimeModelId: "gpt-realtime-2")
+
+        #expect(parsed.requiresGatewayRealtimeTransport)
+        #expect(parsed.openAIRequiresGatewayRealtimeTransport)
+        #expect(parsed.executionMode == .realtimeRelay)
+        #expect(gatewayDefaultRouting.route == .realtimeRelay)
+        #expect(openAIRouting.route == .realtimeRelay)
+    }
+
+    @Test func `routes forced agent consultation through gateway relay without mode or brain`() {
+        let config: [String: Any] = [
+            "talk": [
+                "realtime": [
+                    "provider": "openai",
+                    "consultRouting": "force-agent-consult",
+                ],
+            ],
+        ]
+
+        let parsed = TalkModeGatewayConfigParser.parse(
+            config: config,
+            defaultProvider: "elevenlabs",
+            defaultModelIdFallback: "eleven_v3",
+            defaultRealtimeModelIdFallback: "gpt-realtime-2",
+            defaultSilenceTimeoutMs: 900)
+        let routing = TalkModeRoutingResolver.resolve(
+            parsed: parsed,
+            providerSelection: .openAIRealtime,
+            defaultProvider: "elevenlabs",
+            defaultRealtimeModelId: "gpt-realtime-2")
+
+        #expect(parsed.requiresGatewayRealtimeTransport)
+        #expect(parsed.openAIRequiresGatewayRealtimeTransport)
+        #expect(routing.executionMode == .realtimeRelay)
+        #expect(routing.route == .realtimeRelay)
     }
 
     @Test func `keeps Azure open AI realtime on gateway relay`() {
@@ -1062,6 +1133,26 @@ struct TalkModeManagerTests {
         #expect(TalkModeManager._test_latestAssistantText(
             messages: messages,
             runId: "missing-run") == nil)
+    }
+
+    @Test func `native Talk chat request inherits thinking policy`() {
+        let request = OpenClawChatGatewayRequests.sendMessage(
+            sessionKey: "agent:main:main",
+            agentID: nil,
+            expectedSessionRoutingContract: nil,
+            message: "hello",
+            thinking: TalkModeManager.chatThinkingOverride,
+            idempotencyKey: "talk-1",
+            attachments: [],
+            runTimeoutMs: 30000)
+
+        #expect(TalkModeManager.chatThinkingOverride == nil)
+        #expect(request.method == "chat.send")
+        #expect(request.params["message"]?.value as? String == "hello")
+        #expect(request.params["sessionKey"]?.value as? String == "agent:main:main")
+        #expect(request.params["idempotencyKey"]?.value as? String == "talk-1")
+        #expect(request.params["thinking"] == nil)
+        #expect(request.params["timeoutMs"]?.value as? Int == 30000)
     }
 
     @Test func `subscribes before sending chat completion request`() throws {

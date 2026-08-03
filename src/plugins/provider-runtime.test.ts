@@ -8,6 +8,7 @@ import {
   expectAugmentedCodexCatalog,
   expectCodexMissingAuthHint,
 } from "./provider-runtime.test-support.js";
+import { withPluginRuntimeRegistryScope } from "./runtime/gateway-request-scope.js";
 import type {
   AnyAgentTool,
   ProviderExternalAuthProfile,
@@ -49,6 +50,7 @@ const resolveBundledProviderPolicySurfaceMock = vi.fn<ResolveBundledProviderPoli
 );
 const providerRuntimeWarnMock = vi.fn();
 
+let getAiTransportHost: typeof import("@openclaw/ai").getAiTransportHost;
 let augmentModelCatalogWithProviderPlugins: typeof import("./provider-runtime.js").augmentModelCatalogWithProviderPlugins;
 let buildProviderAuthDoctorHintWithPlugin: typeof import("./provider-runtime.js").buildProviderAuthDoctorHintWithPlugin;
 let buildProviderMissingAuthMessageWithPlugin: typeof import("./provider-runtime.js").buildProviderMissingAuthMessageWithPlugin;
@@ -56,6 +58,7 @@ let buildProviderUnknownModelHintWithPlugin: typeof import("./provider-runtime.j
 let applyProviderNativeStreamingUsageCompatWithPlugin: typeof import("./provider-runtime.js").applyProviderNativeStreamingUsageCompatWithPlugin;
 let applyProviderConfigDefaultsWithPlugin: typeof import("./provider-runtime.js").applyProviderConfigDefaultsWithPlugin;
 let formatProviderAuthProfileApiKeyWithPlugin: typeof import("./provider-runtime.js").formatProviderAuthProfileApiKeyWithPlugin;
+let loginProviderOAuthWithPlugin: typeof import("./provider-runtime.js").loginProviderOAuthWithPlugin;
 let classifyProviderFailoverReasonWithPlugin: typeof import("./provider-runtime.js").classifyProviderFailoverReasonWithPlugin;
 let matchesProviderContextOverflowWithPlugin: typeof import("./provider-runtime.js").matchesProviderContextOverflowWithPlugin;
 let normalizeProviderConfigWithPlugin: typeof import("./provider-runtime.js").normalizeProviderConfigWithPlugin;
@@ -89,6 +92,7 @@ let normalizeProviderResolvedModelWithPlugin: typeof import("./provider-runtime.
 let prepareProviderDynamicModel: typeof import("./provider-runtime.js").prepareProviderDynamicModel;
 let prepareProviderRuntimeAuth: typeof import("./provider-runtime.js").prepareProviderRuntimeAuth;
 let refreshProviderOAuthCredentialWithPlugin: typeof import("./provider-runtime.js").refreshProviderOAuthCredentialWithPlugin;
+let resolveProviderOAuthCredentialWithPlugin: typeof import("./provider-runtime.js").resolveProviderOAuthCredentialWithPlugin;
 let resolveProviderRuntimePlugin: typeof import("./provider-runtime.js").resolveProviderRuntimePlugin;
 let providerRuntimeTesting: typeof import("./provider-runtime.js").testing;
 let runProviderDynamicModel: typeof import("./provider-runtime.js").runProviderDynamicModel;
@@ -289,6 +293,10 @@ describe("provider-runtime", () => {
         resolveOwningPluginIdsForProviderMock(params as never),
       resolveOwningPluginIdsForProviderRef: (params: unknown) =>
         resolveOwningPluginIdsForProviderMock(params as never),
+      resolveProviderRefOwnership: (params: unknown) => {
+        const pluginIds = resolveOwningPluginIdsForProviderMock(params as never);
+        return pluginIds?.length ? { status: "owned", pluginIds } : { status: "unowned" };
+      },
     }));
     vi.doMock("./providers.runtime.js", () => ({
       resolvePluginProviders: (params: unknown) => resolvePluginProvidersMock(params as never),
@@ -313,6 +321,7 @@ describe("provider-runtime", () => {
       applyProviderResolvedTransportWithPlugin,
       classifyProviderFailoverReasonWithPlugin,
       formatProviderAuthProfileApiKeyWithPlugin,
+      loginProviderOAuthWithPlugin,
       matchesProviderContextOverflowWithPlugin,
       normalizeProviderConfigWithPlugin,
       normalizeProviderModelIdWithPlugin,
@@ -344,6 +353,7 @@ describe("provider-runtime", () => {
       prepareProviderDynamicModel,
       prepareProviderRuntimeAuth,
       refreshProviderOAuthCredentialWithPlugin,
+      resolveProviderOAuthCredentialWithPlugin,
       resolveProviderRuntimePlugin,
       testing: providerRuntimeTesting,
       runProviderDynamicModel,
@@ -351,6 +361,8 @@ describe("provider-runtime", () => {
       wrapProviderSimpleCompletionStreamFn,
       wrapProviderStreamFn,
     } = await import("./provider-runtime.js"));
+    await import("../agents/ai-transport-runtime-host.js");
+    ({ getAiTransportHost } = await import("@openclaw/ai"));
     ({ createEmptyPluginRegistry } = await import("./registry.js"));
     ({ resetPluginRuntimeStateForTest, setActivePluginRegistry } = await import("./runtime.js"));
   });
@@ -358,7 +370,6 @@ describe("provider-runtime", () => {
   beforeEach(() => {
     resetPluginRuntimeStateForTest();
     providerRuntimeTesting.clearProviderRuntimePluginCacheForTest();
-    providerRuntimeTesting.resetExternalAuthFallbackWarningCacheForTest();
     resolvePluginProvidersMock.mockReset();
     resolvePluginProvidersMock.mockReturnValue([]);
     isPluginProvidersLoadInFlightMock.mockReset();
@@ -390,6 +401,83 @@ describe("provider-runtime", () => {
       provider: "Open Router",
       expectedPluginId: "openrouter",
     });
+  });
+
+  it("dispatches session OAuth operations to the owning provider", async () => {
+    const loginOAuth = vi.fn(async () => ({
+      access: "login-access",
+      refresh: "login-refresh",
+      expires: 123,
+    }));
+    const refreshOAuth = vi.fn(async (credential) => ({
+      ...credential,
+      access: "refreshed-access",
+    }));
+    resolvePluginProvidersMock.mockReturnValue([
+      {
+        id: "plugin-oauth",
+        label: "Plugin OAuth",
+        auth: [],
+        loginOAuth,
+        refreshOAuth,
+        formatApiKey: (credential) =>
+          credential.type === "oauth" ? `formatted:${credential.access}` : "",
+      },
+    ]);
+
+    await expect(
+      loginProviderOAuthWithPlugin({
+        provider: "plugin-oauth",
+        context: { onAuth: vi.fn(), onPrompt: vi.fn(async () => "") },
+      }),
+    ).resolves.toMatchObject({
+      status: "available",
+      credentials: { access: "login-access", refresh: "login-refresh" },
+    });
+    await expect(
+      resolveProviderOAuthCredentialWithPlugin({
+        provider: "plugin-oauth",
+        credential: {
+          type: "oauth",
+          provider: "plugin-oauth",
+          access: "old-access",
+          refresh: "refresh",
+          expires: 1,
+        },
+        refresh: true,
+      }),
+    ).resolves.toMatchObject({
+      status: "available",
+      apiKey: "formatted:refreshed-access",
+      credential: { access: "refreshed-access" },
+    });
+    expect(loginOAuth).toHaveBeenCalledOnce();
+    expect(refreshOAuth).toHaveBeenCalledOnce();
+  });
+
+  it("distinguishes an owned but unavailable OAuth provider", async () => {
+    resolveOwningPluginIdsForProviderMock.mockReturnValue(["plugin-oauth"]);
+    resolvePluginProvidersMock.mockReturnValue([]);
+
+    await expect(
+      loginProviderOAuthWithPlugin({
+        provider: "plugin-oauth",
+        context: { onAuth: vi.fn(), onPrompt: vi.fn(async () => "") },
+      }),
+    ).resolves.toEqual({ status: "configured-unavailable" });
+    await expect(
+      resolveProviderOAuthCredentialWithPlugin({
+        provider: "plugin-oauth",
+        credential: {
+          type: "oauth",
+          provider: "plugin-oauth",
+          access: "old-access",
+          refresh: "refresh",
+          expires: 1,
+        },
+        refresh: true,
+      }),
+    ).resolves.toEqual({ status: "configured-unavailable" });
   });
 
   it("auto-discovers only usage providers declared by their owning plugin", () => {
@@ -552,6 +640,31 @@ describe("provider-runtime", () => {
     expect(resolvePluginProvidersMock).not.toHaveBeenCalled();
   });
 
+  it("uses the prepared run registry without repeating provider discovery", () => {
+    const provider: ProviderPlugin = {
+      id: DEMO_PROVIDER_ID,
+      label: "Prepared demo",
+      auth: [],
+    };
+    const registry = createEmptyPluginRegistry();
+    registry.providers.push({
+      pluginId: DEMO_PROVIDER_ID,
+      provider,
+      source: "test",
+    });
+
+    const resolved = withPluginRuntimeRegistryScope(registry, () =>
+      resolveProviderRuntimePlugin({
+        provider: DEMO_PROVIDER_ID,
+        workspaceDir: "/tmp/prepared-workspace",
+      }),
+    );
+
+    expect(resolved?.id).toBe(DEMO_PROVIDER_ID);
+    expect(resolved?.pluginId).toBe(DEMO_PROVIDER_ID);
+    expect(resolvePluginProvidersMock).not.toHaveBeenCalled();
+  });
+
   it("matches active provider hooks through a custom provider's native api owner", () => {
     const provider: ProviderPlugin = {
       id: "ollama",
@@ -612,6 +725,35 @@ describe("provider-runtime", () => {
         context: createDemoResolvedModelContext({}),
       }),
     ).toBeTypeOf("function");
+    expect(createStreamFn).toHaveBeenCalledOnce();
+    expect(resolvePluginProvidersMock).not.toHaveBeenCalled();
+  });
+
+  it("installs provider stream hooks into the AI transport host", () => {
+    const streamFn = vi.fn();
+    const createStreamFn = vi.fn(() => streamFn);
+    const provider: ProviderPlugin = {
+      id: DEMO_PROVIDER_ID,
+      label: "Demo",
+      auth: [],
+      createStreamFn,
+    };
+    const registry = createEmptyPluginRegistry();
+    registry.providers.push({
+      pluginId: DEMO_PROVIDER_ID,
+      provider,
+      source: "test",
+    });
+    setActivePluginRegistry(registry, "startup-registry", "gateway-bindable", "/tmp/workspace");
+
+    expect(
+      getAiTransportHost().plugin.resolveProviderStream({
+        provider: DEMO_PROVIDER_ID,
+        workspaceDir: "/tmp/workspace",
+        allowRuntimePluginLoad: false,
+        context: createDemoResolvedModelContext({}),
+      }),
+    ).toBe(streamFn);
     expect(createStreamFn).toHaveBeenCalledOnce();
     expect(resolvePluginProvidersMock).not.toHaveBeenCalled();
   });
@@ -1261,18 +1403,16 @@ describe("provider-runtime", () => {
 
   it("respects the shared GPT-5 prompt overlay personality config", () => {
     const contribution = resolveProviderSystemPromptContribution({
-      provider: "opencode",
+      provider: "openai",
       config: {
-        agents: {
-          defaults: {
-            promptOverlays: {
-              gpt5: { personality: "off" },
-            },
+        plugins: {
+          entries: {
+            openai: { config: { personality: "off" } },
           },
         },
       },
       context: {
-        provider: "opencode",
+        provider: "openai",
         modelId: "gpt-5.4",
         promptMode: "full",
       } as never,

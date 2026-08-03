@@ -1,13 +1,34 @@
-/**
- * Subagent registry record types.
- *
- * Defines execution, completion, delivery, pending-delivery, and attachment state stored for child runs.
- */
+import type { SubagentEndReason } from "../context-engine/types.js";
+/** Persisted execution, completion, delivery, and attachment state for child runs. */
 import type { DeliveryContext } from "../utils/delivery-context.types.js";
 import type { AgentRunSessionTarget } from "./run-session-target.js";
 import type { SubagentRunOutcome } from "./subagent-announce-output.js";
+import type { SubagentLaunchAuthorization } from "./subagent-launch-authorization.js";
 import type { SubagentLifecycleEndedReason } from "./subagent-lifecycle-events.js";
 import type { SpawnSubagentMode } from "./subagent-spawn.types.js";
+
+export type SubagentCompletionRequest = {
+  runId: string;
+  /** Exact in-process owner required after acquiring the terminal completion lock. */
+  expectedEntry?: SubagentRunRecord;
+  endedAt?: number;
+  outcome: SubagentRunOutcome;
+  reason: SubagentLifecycleEndedReason;
+  sendFarewell?: boolean;
+  accountId?: string;
+  triggerCleanup: boolean;
+  startedAt?: number;
+  suppressSessionEffects?: boolean;
+  recoverInterrupted?: true;
+  completionSnapshot?: { resultText: string | null; capturedAt: number };
+};
+
+export type ContextEngineSubagentEndedParams = {
+  childSessionKey: string;
+  reason: SubagentEndReason;
+  agentDir?: string;
+  workspaceDir?: string;
+};
 
 export type SubagentProgressOrigin = {
   channel?: string;
@@ -36,8 +57,24 @@ export type PendingFinalDeliveryPayload = {
   wakeOnDescendantSettle?: boolean;
 };
 
-export type SubagentExecutionState = {
+export type SubagentRestartRecoveryReceipt = {
+  sessionId: string;
+  sessionMarker: string;
+  sessionLifecycleRevision?: string;
+  idempotencyKey: string;
+  phase: "reserved" | "attempted" | "consumed" | "accepted" | "abandoned";
+  lifecycleGeneration?: string;
+};
+
+type SubagentExecutionState = {
   status: "queued" | "running" | "interrupted" | "terminal";
+  /** Gateway lifecycle that owns child-session effects for this run. */
+  lifecycleGeneration?: string;
+  /** Durable dispatch receipt for one interrupted-session snapshot. */
+  restartRecovery?: SubagentRestartRecoveryReceipt;
+  /** Sticky terminal policy: this run must never mutate its child session again. */
+  suppressSessionEffects?: true;
+  acceptedAt?: number;
   startedAt?: number;
   endedAt?: number;
   outcome?: SubagentRunOutcome;
@@ -71,6 +108,8 @@ export type SwarmStructuredOutputState = {
 
 export type SwarmQueuedLaunch = {
   request: Record<string, unknown>;
+  /** Exact trusted launch capability, persisted so restart replay cannot lose it. */
+  authorization?: SubagentLaunchAuthorization;
   timeoutMs: number;
   schedulerGroupKey: string;
   maxConcurrent: number;
@@ -147,6 +186,15 @@ type SubagentKillReconciliationState = {
   supersededAt?: number;
 };
 
+type SubagentKillIntent = {
+  requestedAt: number;
+  reason: string;
+  lifecycleGeneration?: string;
+  sessionId?: string;
+  sessionLifecycleRevision?: string;
+  suppressTaskDelivery?: boolean;
+};
+
 export type SubagentRunRecord = {
   runId: string;
   /** Detached task owner; steer/restart changes runId but continues the same task. */
@@ -178,11 +226,8 @@ export type SubagentRunRecord = {
   /** Monotonic ownership generation within one child session. */
   generation?: number;
   createdAt: number;
-  startedAt?: number;
   sessionStartedAt?: number;
   accumulatedRuntimeMs?: number;
-  endedAt?: number;
-  outcome?: SubagentRunOutcome;
   archiveAtMs?: number;
   cleanupCompletedAt?: number;
   cleanupHandled?: boolean;
@@ -191,13 +236,15 @@ export type SubagentRunRecord = {
   terminalOwner?: "interrupted-recovery";
   /** Present only while a current-version killed run awaits bounded reconciliation. */
   killReconciliation?: SubagentKillReconciliationState;
+  /** Durable operator cancellation ownership before runtime side effects complete. */
+  killIntent?: SubagentKillIntent;
   /** Durable requester-stop policy until silent completion cleanup finishes. */
   suppressCompletionDelivery?: boolean;
   expectsCompletionMessage?: boolean;
   endedReason?: SubagentLifecycleEndedReason;
   pauseReason?: "sessions_yield";
   wakeOnDescendantSettle?: boolean;
-  execution?: SubagentExecutionState;
+  execution: SubagentExecutionState;
   completion?: SubagentCompletionState;
   /** Set after the subagent_ended hook has been emitted successfully once. */
   endedHookEmittedAt?: number;
@@ -239,4 +286,24 @@ export type SubagentRunRecord = {
   /** Set after failed-launch context-engine cleanup succeeds, preventing duplicate end hooks. */
   contextEngineCleanupCompletedAt?: number;
   collectorCompletion?: SwarmCollectorCompletion;
+};
+
+/** Minimal registry shape needed by session-list topology and display reads. */
+export type SubagentRunReadRecord = Pick<
+  SubagentRunRecord,
+  | "runId"
+  | "childSessionKey"
+  | "controllerSessionKey"
+  | "requesterSessionKey"
+  | "model"
+  | "generation"
+  | "createdAt"
+  | "sessionStartedAt"
+  | "accumulatedRuntimeMs"
+  | "runTimeoutSeconds"
+  | "endedReason"
+  | "cleanupCompletedAt"
+  | "delivery"
+> & {
+  execution: Pick<SubagentExecutionState, "startedAt" | "endedAt" | "outcome">;
 };
